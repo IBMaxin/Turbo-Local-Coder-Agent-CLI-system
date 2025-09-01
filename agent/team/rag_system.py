@@ -31,24 +31,42 @@ class KnowledgeChunk:
             self.created_at = time.time()
 
 
-class SimpleEmbedding:
-    """Lightweight embedding system using TF-IDF style scoring."""
+class SemanticEmbedding:
+    """Semantic embedding system using sentence transformers."""
     
-    def __init__(self):
-        self.vocab: Dict[str, int] = {}
-        self.doc_freq: Dict[str, int] = {}
-        self.total_docs = 0
+    def __init__(self, model_name: str = 'all-MiniLM-L6-v2'):
+        try:
+            from sentence_transformers import SentenceTransformer
+            import numpy as np
+            self.model = SentenceTransformer(model_name)
+            self.np = np
+        except ImportError:
+            # Fallback to TF-IDF if sentence-transformers not available
+            self.model = None
+            self.vocab: Dict[str, int] = {}
+            self.doc_freq: Dict[str, int] = {}
+            self.total_docs = 0
     
-    def _tokenize(self, text: str) -> List[str]:
-        """Simple tokenization."""
-        # Convert to lowercase, split on non-alphanumeric
-        tokens = re.findall(r'\b\w+\b', text.lower())
-        # Add code-specific tokens
-        code_tokens = re.findall(r'[A-Za-z_][A-Za-z0-9_]*', text)
-        return list(set(tokens + [t.lower() for t in code_tokens]))
+    def get_embedding(self, text: str):
+        """Get semantic embedding for text."""
+        if self.model:
+            return self.model.encode(text, convert_to_tensor=False)
+        else:
+            # Fallback TF-IDF
+            return self._get_tfidf_embedding(text)
     
-    def add_document(self, text: str) -> Dict[str, float]:
-        """Add document and return TF-IDF scores."""
+    def get_similarity(self, query: str, doc_embedding) -> float:
+        """Calculate similarity between query and document."""
+        if self.model:
+            query_embedding = self.model.encode(query, convert_to_tensor=False)
+            return float(self.np.dot(query_embedding, doc_embedding) / 
+                        (self.np.linalg.norm(query_embedding) * self.np.linalg.norm(doc_embedding)))
+        else:
+            # Fallback TF-IDF similarity
+            return self._get_tfidf_similarity(query, doc_embedding)
+    
+    def _get_tfidf_embedding(self, text: str) -> Dict[str, float]:
+        """Fallback TF-IDF embedding."""
         tokens = self._tokenize(text)
         
         # Update vocabulary and document frequency
@@ -67,13 +85,13 @@ class SimpleEmbedding:
         
         for token in tokens:
             tf = tokens.count(token) / token_count
-            idf = math.log(self.total_docs / self.doc_freq[token])
+            idf = math.log(max(1, self.total_docs / self.doc_freq[token]))
             tf_idf[token] = tf * idf
         
         return tf_idf
     
-    def get_similarity(self, query: str, doc_scores: Dict[str, float]) -> float:
-        """Calculate similarity between query and document."""
+    def _get_tfidf_similarity(self, query: str, doc_scores: Dict[str, float]) -> float:
+        """Fallback TF-IDF similarity."""
         query_tokens = self._tokenize(query)
         
         if not query_tokens:
@@ -85,6 +103,12 @@ class SimpleEmbedding:
                 score += doc_scores[token]
         
         return score / len(query_tokens)
+    
+    def _tokenize(self, text: str) -> List[str]:
+        """Simple tokenization for fallback."""
+        tokens = re.findall(r'\b\w+\b', text.lower())
+        code_tokens = re.findall(r'[A-Za-z_][A-Za-z0-9_]*', text)
+        return list(set(tokens + [t.lower() for t in code_tokens]))
 
 
 class RAGKnowledgeBase:
@@ -92,7 +116,7 @@ class RAGKnowledgeBase:
     
     def __init__(self, db_path: str = "rag_knowledge.db"):
         self.db_path = db_path
-        self.embedding = SimpleEmbedding()
+        self.embedding = SemanticEmbedding()
         self._init_db()
         self._load_builtin_knowledge()
     
@@ -106,7 +130,7 @@ class RAGKnowledgeBase:
                     source TEXT NOT NULL,
                     chunk_type TEXT NOT NULL,
                     keywords TEXT NOT NULL,
-                    tf_idf_scores TEXT NOT NULL,
+                    embedding TEXT NOT NULL,
                     created_at REAL NOT NULL
                 )
             """)
@@ -119,13 +143,19 @@ class RAGKnowledgeBase:
     
     def add_knowledge(self, chunk: KnowledgeChunk) -> str:
         """Add knowledge chunk to the database."""
-        # Calculate TF-IDF scores
-        tf_idf_scores = self.embedding.add_document(chunk.content)
+        # Calculate semantic embedding
+        embedding = self.embedding.get_embedding(chunk.content)
+        
+        # Convert embedding to JSON-serializable format
+        if hasattr(embedding, 'tolist'):
+            embedding_data = embedding.tolist()
+        else:
+            embedding_data = embedding
         
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("""
                 INSERT OR REPLACE INTO knowledge_chunks
-                (id, content, source, chunk_type, keywords, tf_idf_scores, created_at)
+                (id, content, source, chunk_type, keywords, embedding, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
                 chunk.id,
@@ -133,7 +163,7 @@ class RAGKnowledgeBase:
                 chunk.source,
                 chunk.chunk_type,
                 json.dumps(chunk.keywords),
-                json.dumps(tf_idf_scores),
+                json.dumps(embedding_data),
                 chunk.created_at
             ))
         
@@ -169,8 +199,8 @@ class RAGKnowledgeBase:
                 created_at=row[6]
             )
             
-            tf_idf_scores = json.loads(row[5])
-            relevance = self.embedding.get_similarity(query, tf_idf_scores)
+            embedding_data = json.loads(row[5])
+            relevance = self.embedding.get_similarity(query, embedding_data)
             
             scored_chunks.append((chunk, relevance))
         

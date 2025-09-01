@@ -48,7 +48,8 @@ class CodingWorkflow:
     
     def execute_full_workflow(self, description: str, 
                             skip_review: bool = False,
-                            skip_testing: bool = False) -> WorkflowResult:
+                            skip_testing: bool = False,
+                            apply_changes: bool = True) -> WorkflowResult:
         """Execute the complete coding workflow."""
         start_time = time.time()
         result = WorkflowResult(success=False, task_id="", total_time=0.0)

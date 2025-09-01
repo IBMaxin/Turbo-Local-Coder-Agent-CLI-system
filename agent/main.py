@@ -107,8 +107,8 @@ def main(
     
     try:
         # Check if we should use multi-agent workflow
-        if team or any([review, test, docs]):
-            # Enhanced/multi-agent workflow
+        if team:
+            # Full multi-agent workflow
             result = execute_enhanced_workflow(
                 task=task,
                 settings=settings,
@@ -119,7 +119,7 @@ def main(
                 full_team=team
             )
         else:
-            # Standard single-agent workflow
+            # Standard single-agent workflow (with or without simple enhancements)
             result = execute_standard_workflow(
                 task=task,
                 settings=settings,

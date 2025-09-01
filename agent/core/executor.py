@@ -13,6 +13,13 @@ from ..tools.fs import fs_read, fs_write, fs_list
 from ..tools.shell import shell_run
 from ..tools.python_exec import python_run
 
+# Import RAG system for success tracking
+try:
+    from ..team.rag_system import RAGKnowledgeBase, KnowledgeChunk
+    _rag_kb = RAGKnowledgeBase()
+except ImportError:
+    _rag_kb = None
+
 
 @dataclass
 class ExecSummary:
@@ -151,6 +158,80 @@ def _dispatch_tool(name: str, args: dict[str, Any], reporter: StreamingReporter 
     return f"ERROR: unknown tool {name}"
 
 
+def _add_success_to_rag(original_prompt: str, tool_name: str, args: dict, result: str):
+    """Add successful tool execution to RAG knowledge base."""
+    if not _rag_kb:
+        return
+    
+    try:
+        import hashlib
+        import time
+        
+        # Create a knowledge chunk from the successful execution pattern
+        task_type = _classify_task_type(original_prompt)
+        file_ext = _extract_file_extension(args.get('path', ''))
+        
+        content = f"""SUCCESSFUL PATTERN:
+Task Type: {task_type}
+File Type: {file_ext}
+Original Request: {original_prompt}
+
+Execution Pattern:
+Tool: {tool_name}
+Arguments: {json.dumps(args, indent=2)}
+Result: {result}
+
+This pattern worked for: {task_type} tasks involving {file_ext} files."""
+
+        chunk_id = f"pattern_{hashlib.md5(f'{task_type}_{tool_name}_{file_ext}'.encode()).hexdigest()[:12]}"
+        
+        chunk = KnowledgeChunk(
+            id=chunk_id,
+            content=content,
+            source="execution_pattern",
+            chunk_type="pattern",
+            keywords=_extract_task_keywords(original_prompt) + [task_type, file_ext, tool_name],
+            created_at=time.time()
+        )
+        
+        _rag_kb.add_knowledge(chunk)
+    except Exception:
+        # Don't fail execution if RAG tracking fails
+        pass
+
+
+def _classify_task_type(prompt: str) -> str:
+    """Classify the type of coding task."""
+    prompt_lower = prompt.lower()
+    
+    if any(word in prompt_lower for word in ['create', 'make', 'new']):
+        return 'creation'
+    elif any(word in prompt_lower for word in ['fix', 'debug', 'error', 'bug']):
+        return 'debugging'
+    elif any(word in prompt_lower for word in ['add', 'implement', 'extend']):
+        return 'enhancement'
+    elif any(word in prompt_lower for word in ['refactor', 'improve', 'optimize']):
+        return 'refactoring'
+    else:
+        return 'modification'
+
+
+def _extract_file_extension(path: str) -> str:
+    """Extract file extension from path."""
+    if not path:
+        return 'unknown'
+    ext = path.split('.')[-1] if '.' in path else 'no_extension'
+    return ext.lower()
+
+
+def _extract_task_keywords(text: str) -> list[str]:
+    """Extract keywords from task description."""
+    import re
+    words = re.findall(r'\b\w+\b', text.lower())
+    stop_words = {"the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", "create", "add", "make", "write"}
+    return list(set(w for w in words if len(w) > 2 and w not in stop_words))
+
+
 def execute(coder_prompt: str,
             s: Settings | None = None,
             reporter: StreamingReporter | QuietReporter = None) -> ExecSummary:
@@ -161,9 +242,29 @@ def execute(coder_prompt: str,
         {
             "role": "system",
             "content": (
-                "You are the Coder. Use ONLY tools to read/write files and "
-                "run tests. Prefer incremental edits. Stop and summarize "
-                "when work is complete or tests pass."
+                "You are the Coder. Your job is to implement requested changes by calling tools.\n\n"
+                "EXAMPLE WORKFLOW:\n"
+                "User: Create a simple math.py file with add function\n"
+                "Assistant: {\"name\": \"fs_write\", \"arguments\": {\"path\": \"math.py\", \"content\": \"def add(a, b):\\n    return a + b\"}}\n"
+                "Tool result: wrote math.py (2 lines, 25 bytes)\n"
+                "Assistant: I've created math.py with an add function that takes two parameters and returns their sum.\n\n"
+                
+                "User: Add error handling to existing config.py\n"
+                "Assistant: {\"name\": \"fs_read\", \"arguments\": {\"path\": \"config.py\"}}\n"
+                "Tool result: def load_config(): return {...}\n"
+                "Assistant: {\"name\": \"fs_write\", \"arguments\": {\"path\": \"config.py\", \"content\": \"def load_config():\\n    try:\\n        return {...}\\n    except Exception as e:\\n        print(f'Error: {e}')\\n        return None\"}}\n"
+                "Tool result: wrote config.py (5 lines, 120 bytes)\n"
+                "Assistant: I've added try-catch error handling to the load_config function.\n\n"
+                
+                "RULES:\n"
+                "1. ALWAYS call tools to make actual changes - descriptions don't count\n"
+                "2. For file modifications: fs_read first, then fs_write with complete content\n"
+                "3. For new files: directly use fs_write\n"
+                "4. Each tool call must be valid JSON on its own line\n"
+                "5. After successful tool calls, briefly confirm what was done\n"
+                "6. Continue until task is fully complete\n\n"
+                
+                "Remember: You must EXECUTE changes with tools, not just analyze or describe them."
             ),
         },
         {"role": "user", "content": coder_prompt},
@@ -182,6 +283,12 @@ def execute(coder_prompt: str,
                 "messages": messages,
                 "tools": tools,
                 "stream": True,
+                "options": {
+                    "temperature": 0.1,
+                    "top_p": 0.9,
+                    "repeat_penalty": 1.1,
+                    "stop": ["```\n\n", "---", "HUMAN:", "USER:"]
+                }
             }
             content_chunks = []
             tool_calls = []
@@ -211,6 +318,7 @@ def execute(coder_prompt: str,
             content = "".join(content_chunks)
             last_text = content or last_text
             calls = tool_calls
+            
             # If no proper tool_calls but content looks like a tool call, parse it
             if not calls and content:
                 json_content = content.strip()
@@ -223,6 +331,7 @@ def execute(coder_prompt: str,
                 if json_content.endswith('```'):
                     json_content = json_content[:-3]
                 json_content = json_content.strip()
+                
                 
                 # Extract just the JSON object - find balanced braces
                 import re
@@ -249,15 +358,19 @@ def execute(coder_prompt: str,
                                     "arguments": tool_data["arguments"]
                                 }
                             }]
-                            if reporter and hasattr(reporter, 'verbose') and reporter.verbose:
-                                print(f"DEBUG: Parsed tool call from content: {calls[0]}")
-                    except json.JSONDecodeError as e:
-                        if reporter and hasattr(reporter, 'verbose') and reporter.verbose:
-                            print(f"DEBUG: Failed to parse JSON: {e}")
-                            print(f"DEBUG: Content was: {json_obj[:200]}")
-                            print(f"DEBUG: Full content was: {json_content[:500]}")
+                    except json.JSONDecodeError:
+                        pass
+            
+            # Exit if no tool calls were found
             if not calls:
+                # If no tool calls but we haven't made progress, prompt to continue
+                if steps <= 2 and last_text and not any("wrote " in msg.get("content", "") for msg in messages[-3:]):
+                    continue_prompt = "Continue with the implementation. You must call tools to make actual changes."
+                    messages.append({"role": "user", "content": continue_prompt})
+                    continue
                 break
+            
+            error_occurred = False
             for call in calls:
                 fn = (call.get("function") or {}).get("name", "")
                 raw = (call.get("function") or {}).get("arguments", "{}")
@@ -270,7 +383,31 @@ def execute(coder_prompt: str,
                         args = json.loads(raw) if isinstance(raw, str) else raw
                 except json.JSONDecodeError:
                     args = {}
+                
                 result = _dispatch_tool(fn, args, reporter)
                 messages.append({"role": "tool", "content": result, "name": fn})
+                
+                # Check for errors and auto-retry
+                if result.startswith("ERROR:") or "failed" in result.lower():
+                    # Track retry attempts per step/call combination
+                    retry_key = f"step_{steps}_{fn}_{json.dumps(args, sort_keys=True)}"
+                    if not hasattr(execute, '_retry_counts'):
+                        execute._retry_counts = {}
+                    
+                    retry_count = execute._retry_counts.get(retry_key, 0)
+                    if retry_count < 2:
+                        execute._retry_counts[retry_key] = retry_count + 1
+                        error_fix_prompt = f"The tool call failed with error: {result}\nPlease fix the issue and try again. Focus on correcting the specific error mentioned."
+                        messages.append({"role": "user", "content": error_fix_prompt})
+                        error_occurred = True
+                        break  # Break out of tool loop to retry
+                
+                # Track successful operations for RAG learning
+                if "wrote " in result and result.startswith("wrote "):
+                    _add_success_to_rag(coder_prompt, fn, args, result)
+            
+            # If error occurred, continue to next step to allow retry
+            if error_occurred:
+                continue
 
     return ExecSummary(steps=steps, last=last_text)
