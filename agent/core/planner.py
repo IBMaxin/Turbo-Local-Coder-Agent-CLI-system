@@ -5,10 +5,9 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
-
 from .config import Settings, load_settings
 from .enhancement import AutoEnhancementSystem
+from .backend_manager import get_backend
 
 
 @dataclass
@@ -76,62 +75,38 @@ def get_plan(task: str, s: Settings | None = None, enhance: bool = True, force_l
             print(f"[WARN] Enhancement failed, using original task: {e}")
             enhanced_task = task
     
-    # Use local_host by default for local-only operation
-    api_host = s.local_host if force_local else s.turbo_host
-    url = f"{api_host}/api/chat"
+    messages = [
+        {"role": "system", "content": SYSTEM_PLANNER},
+        {"role": "user", "content": enhanced_task},
+    ]
     
-    # Build headers - skip Authorization for local Ollama
-    headers = {"Content-Type": "application/json"}
-    
-    # Only add Authorization header if using remote API with a valid key
-    if not force_local and s.api_key and s.api_key.strip():
-        # Ensure API key is ASCII-safe
-        try:
-            s.api_key.encode('ascii')
-            headers["Authorization"] = f"Bearer {s.api_key}"
-        except UnicodeEncodeError:
-            print("[WARN] API key contains non-ASCII characters, skipping Authorization header")
-    
-    body = {
-        "model": s.planner_model,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PLANNER},
-            {"role": "user", "content": enhanced_task},
-        ],
-        "stream": False,
-        "tools": [],  # Explicitly disable tools for planner
-    }
-    
-    print(f"[DEBUG] Calling planner at: {url}")
+    print(f"[DEBUG] Calling planner with backend: {s.backend}")
     print(f"[DEBUG] Using model: {s.planner_model}")
     print(f"[DEBUG] Local mode: {force_local}")
     
-    with httpx.Client(timeout=s.request_timeout_s) as cli:
-        try:
-            resp = cli.post(url, headers=headers, json=body)
-            resp.raise_for_status()
-            data = resp.json()
-        except httpx.HTTPError as e:
-            print(f"[ERROR] HTTP request failed: {e}")
-            print(f"[ERROR] URL: {url}")
-            print(f"[ERROR] Status code: {getattr(e.response, 'status_code', 'N/A')}")
-            if hasattr(e, 'response') and e.response:
-                print(f"[ERROR] Response: {e.response.text[:500]}")
-            raise
-
-    content = data.get("message", {}).get("content", "")
+    # Get backend and make request
+    backend = get_backend(s)
+    
+    try:
+        content_parts = []
+        for response in backend.chat(messages, s.planner_model, tools=[], stream=False):
+            if response.content:
+                content_parts.append(response.content)
+            if response.done:
+                break
+        
+        content = "".join(content_parts)
+        
+    except Exception as e:
+        print(f"[ERROR] Backend request failed: {e}")
+        raise
     
     # Handle case where model returns tool calls instead of content
-    if not content and "tool_calls" in data.get("message", {}):
+    if not content:
         raise ValueError(
-            f"planner returned tool calls instead of JSON content. "
-            f"Tool calls: {data.get('message', {}).get('tool_calls', [])}\n"
+            f"planner returned empty content. "
             f"Make sure the planner model is configured to return JSON only, not tool calls."
         )
-    
-    if not content:
-        print(f"[ERROR] Empty content from model. Full response: {data}")
-        raise ValueError(f"planner returned empty content. Response: {data}")
     
     content = _strip_code_fences(content)
     try:
