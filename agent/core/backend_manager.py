@@ -52,12 +52,17 @@ class OllamaBackend(BaseBackend):
             "model": model,
             "messages": messages,
             "stream": stream,
+            "options": {
+                "num_predict": 2048,  # Max tokens to generate
+                "temperature": 0.7,
+            }
         }
         
-        if tools:
+        # Only add tools if not empty
+        if tools and len(tools) > 0:
             payload["tools"] = tools
         
-        self.logger.debug(f"Ollama request to {url} with model {model}, stream={stream}")
+        self.logger.debug(f"Ollama request to {url} with model {model}, stream={stream}, num_predict=2048")
         
         with httpx.Client(timeout=self.settings.request_timeout_s) as client:
             if not stream:
@@ -69,6 +74,14 @@ class OllamaBackend(BaseBackend):
                 msg = data.get("message", {}) or {}
                 content = msg.get("content") or ""
                 tool_calls = msg.get("tool_calls") or []
+                
+                # Validate response is complete
+                if data.get("done") is False:
+                    self.logger.warning("Response marked as incomplete (done=False)")
+                
+                # Log response metadata
+                if "eval_count" in data:
+                    self.logger.debug(f"Generated {data['eval_count']} tokens")
                 
                 yield ChatResponse(
                     content=content,
@@ -105,6 +118,11 @@ class OllamaBackend(BaseBackend):
                         
                         if data.get("done", False):
                             final_content = "".join(content_chunks)
+                            
+                            # Log generation stats
+                            if "eval_count" in data:
+                                self.logger.debug(f"Generated {data['eval_count']} tokens")
+                            
                             yield ChatResponse(
                                 content=final_content,
                                 tool_calls=tool_calls if tool_calls else None,
@@ -165,9 +183,11 @@ class LlamaCppBackend(BaseBackend):
         payload = {
             "messages": messages,
             "stream": stream,
+            "max_tokens": 2048,
         }
         
-        if tools:
+        # Only add tools if not empty
+        if tools and len(tools) > 0:
             payload["tools"] = tools
         
         self.logger.debug(f"llama.cpp request to {url}, stream={stream}")
