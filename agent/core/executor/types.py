@@ -1,19 +1,16 @@
-"""Type definitions for executor."""
-from dataclasses import dataclass
-from typing import TypedDict, Any, Dict, Optional
+"""Type definitions for executor.
 
-@dataclass
-class ExecSummary:
-    steps: int
-    last_output: str
+Keep this module minimal to avoid circular imports.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Optional
+
 
 @dataclass
 class ExecutionResult:
     success: bool
     output: str
     error: Optional[str] = None
-
-class ToolSchema(TypedDict):
-    name: str
-    description: str
-    parameters: Dict[str, Any]

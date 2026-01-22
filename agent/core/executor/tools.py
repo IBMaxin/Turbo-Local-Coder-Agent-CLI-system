@@ -1,9 +1,15 @@
 """Tool definitions and schemas."""
-from typing import List, Any, Dict
-from .types import ToolSchema
 
-def get_tool_schemas() -> List[Dict[str, Any]]:
+from __future__ import annotations
+
+from typing import Any
+
+from .base import ToolSchema
+
+
+def get_tool_schemas() -> list[ToolSchema]:
     """Return the JSON schema for available tools."""
+
     return [
         {
             "type": "function",

@@ -8,10 +8,40 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Literal, TypedDict
 
-from .types import ExecutionResult, ToolSchema
-from .tools import get_tool_schemas
+try:
+    # Python 3.11+
+    from typing import NotRequired
+except ImportError:  # pragma: no cover
+    from typing_extensions import NotRequired  # type: ignore
+
+from .types import ExecutionResult
+
+
+# ---------------------------------------------------------------------------
+# Public tool schema / call typing (used by formatters + orchestrator)
+# ---------------------------------------------------------------------------
+
+class ToolFunctionCall(TypedDict):
+    name: str
+    arguments: dict[str, Any]
+
+
+class ToolCall(TypedDict):
+    function: ToolFunctionCall
+    type: NotRequired[Literal["function"]]
+
+
+class ToolFunctionSchema(TypedDict):
+    name: str
+    description: str
+    parameters: dict[str, Any]
+
+
+class ToolSchema(TypedDict):
+    type: Literal["function"]
+    function: ToolFunctionSchema
 
 
 # ---------------------------------------------------------------------------
@@ -26,8 +56,11 @@ class ExecSummary:
     last: str
 
 
-def get_tool_schema() -> list[dict[str, Any]]:
+def get_tool_schema() -> list[ToolSchema]:
     """Return tool schema objects used by formatters/backends."""
+
+    # Local import to avoid circular dependency (tools imports ToolSchema).
+    from .tools import get_tool_schemas
 
     return get_tool_schemas()
 
@@ -39,17 +72,14 @@ def get_tool_schema() -> list[dict[str, Any]]:
 def sanitize_path(path: str) -> str:
     """Validate/sanitize a filesystem path.
 
-    Notes:
-        This is intentionally conservative. It rejects path traversal and
-        absolute paths to keep tool calls scoped to the repo/workdir.
+    Intentionally conservative: rejects traversal and absolute paths.
     """
 
     if not isinstance(path, str) or not path.strip():
         raise ValueError("Invalid path")
 
-    p = path.strip().replace("\\x00", "")
+    p = path.strip().replace("\x00", "")
 
-    # Disallow traversal/absolute paths.
     if p.startswith(("/", "\\")):
         raise ValueError("Absolute paths are not allowed")
     if ".." in p.split("/"):
@@ -61,7 +91,7 @@ def sanitize_path(path: str) -> str:
 def sanitize_command(cmd: str) -> str:
     """Validate/sanitize a shell command.
 
-    This blocks common shell metacharacters used for chaining/redirection.
+    Blocks common shell metacharacters used for chaining/redirection.
     """
 
     if not isinstance(cmd, str) or not cmd.strip():
