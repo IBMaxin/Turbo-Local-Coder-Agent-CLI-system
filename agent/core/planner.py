@@ -76,10 +76,22 @@ def get_plan(task: str, s: Settings | None = None, enhance: bool = True, force_l
             print(f"[WARN] Enhancement failed, using original task: {e}")
             enhanced_task = task
     
-    headers = {
-        "Authorization": f"Bearer {s.api_key}",
-        "Content-Type": "application/json",
-    }
+    # Use local_host by default for local-only operation
+    api_host = s.local_host if force_local else s.turbo_host
+    url = f"{api_host}/api/chat"
+    
+    # Build headers - skip Authorization for local Ollama
+    headers = {"Content-Type": "application/json"}
+    
+    # Only add Authorization header if using remote API with a valid key
+    if not force_local and s.api_key and s.api_key.strip():
+        # Ensure API key is ASCII-safe
+        try:
+            s.api_key.encode('ascii')
+            headers["Authorization"] = f"Bearer {s.api_key}"
+        except UnicodeEncodeError:
+            print("[WARN] API key contains non-ASCII characters, skipping Authorization header")
+    
     body = {
         "model": s.planner_model,
         "messages": [
@@ -90,12 +102,9 @@ def get_plan(task: str, s: Settings | None = None, enhance: bool = True, force_l
         "tools": [],  # Explicitly disable tools for planner
     }
     
-    # Use local_host by default for local-only operation
-    api_host = s.local_host if force_local else s.turbo_host
-    url = f"{api_host}/api/chat"
-    
     print(f"[DEBUG] Calling planner at: {url}")
     print(f"[DEBUG] Using model: {s.planner_model}")
+    print(f"[DEBUG] Local mode: {force_local}")
     
     with httpx.Client(timeout=s.request_timeout_s) as cli:
         try:
