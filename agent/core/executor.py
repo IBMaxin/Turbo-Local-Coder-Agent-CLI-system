@@ -109,14 +109,27 @@ def _format_tools_for_qwen3(tools: list[dict]) -> str:
 
 
 def _format_tools_for_phi4(tools: list[dict]) -> str:
-    """Format tools in Phi-4-mini's expected format."""
+    """Format tools in Phi-4-mini's expected format per official HF docs."""
     # Phi-4 wants simpler format
     simplified = [{"name": t["function"]["name"], 
                    "description": t["function"]["description"],
                    "parameters": t["function"]["parameters"]} 
                   for t in tools]
     tools_json = json.dumps(simplified, indent=2)
-    return f"<|tool|>\n{tools_json}\n</|tool|>"
+    return f"<|tool|>\n{tools_json}\n<|/tool|>"
+
+
+def _format_tools_for_granite4(tools: list[dict]) -> str:
+    """Format tools for Granite4 using IBM's bracket notation style."""
+    tool_desc = []
+    for t in tools:
+        name = t["function"]["name"]
+        desc = t["function"]["description"]
+        params = t["function"]["parameters"]["properties"]
+        param_list = ", ".join(f"{k}=<{v['type']}>" for k, v in params.items())
+        tool_desc.append(f"- {name}({param_list}): {desc}")
+    
+    return "\n".join(tool_desc)
 
 
 def _extract_qwen3_tool_calls(content: str) -> list[dict]:
@@ -166,6 +179,37 @@ def _extract_phi4_tool_calls(content: str) -> list[dict]:
                     }
                 })
         except json.JSONDecodeError:
+            continue
+    
+    return tool_calls
+
+
+def _extract_granite4_tool_calls(content: str) -> list[dict]:
+    """Extract tool calls from Granite4's bracket notation: [func_name(param="value")]"""
+    tool_calls = []
+    
+    # Pattern to match [function_name(param1="val1", param2="val2")]
+    pattern = r'\[(\w+)\((.*?)\)\]'
+    matches = re.findall(pattern, content)
+    
+    for func_name, args_str in matches:
+        try:
+            # Parse arguments
+            arguments = {}
+            if args_str.strip():
+                # Split by comma but respect quotes
+                arg_pattern = r'(\w+)\s*=\s*(["\'](.*?)\2|[^,]+)'
+                arg_matches = re.findall(arg_pattern, args_str)
+                for param, _, value in arg_matches:
+                    arguments[param] = value
+            
+            tool_calls.append({
+                "function": {
+                    "name": func_name,
+                    "arguments": arguments
+                }
+            })
+        except Exception:
             continue
     
     return tool_calls
@@ -307,6 +351,11 @@ def _is_phi4_model(model_name: str) -> bool:
     return 'phi4' in model_name.lower() or 'phi-4' in model_name.lower()
 
 
+def _is_granite4_model(model_name: str) -> bool:
+    """Check if model is Granite4 (needs IBM bracket notation)."""
+    return 'granite4' in model_name.lower() or 'granite-4' in model_name.lower()
+
+
 def execute(coder_prompt: str,
             s: Settings | None = None,
             reporter: StreamingReporter | QuietReporter = None) -> ExecSummary:
@@ -317,6 +366,7 @@ def execute(coder_prompt: str,
     # Detect model type and format tools accordingly
     use_qwen3_format = _is_qwen3_model(s.coder_model)
     use_phi4_format = _is_phi4_model(s.coder_model)
+    use_granite4_format = _is_granite4_model(s.coder_model)
     
     if use_qwen3_format:
         print(f"[DEBUG] Using Qwen3 XML tool format for model: {s.coder_model}")
@@ -348,11 +398,30 @@ def execute(coder_prompt: str,
             '<|tool_call|>[ {"type": "function", "function": {"name": "tool_name", "arguments": {...}}} ]\n\n'
             "EXAMPLE:\n"
             "User: Create hello.py with hello world\n"
-            'Assistant: <|tool_call|>[ {"type": "function", "function": {"name": "fs_write", "arguments": {"path": "hello.py", "content": "print(\\'Hello, World!\\')"}}} ]\n\n'
+            'Assistant: <|tool_call|>[ {"type": "function", "function": {"name": "fs_write", "arguments": {"path": "hello.py", "content": "print(\'Hello, World!\')"}}} ]\n\n'
             "RULES:\n"
             "1. ALWAYS output tool calls using <|tool_call|> tags\n"
             "2. For file modifications: fs_read first, then fs_write\n"
             "3. JSON must be valid and properly escaped\n"
+            "4. Continue until task is fully complete"
+        )
+    elif use_granite4_format:
+        print(f"[DEBUG] Using Granite4 IBM bracket notation for model: {s.coder_model}")
+        tools_description = _format_tools_for_granite4(tools)
+        
+        system_content = (
+            "You are the Coder. Your job is to implement requested changes by calling tools.\n\n"
+            "AVAILABLE TOOLS:\n"
+            f"{tools_description}\n\n"
+            "To call a tool, use IBM bracket notation:\n"
+            '[function_name(param1="value1", param2="value2")]\n\n'
+            "EXAMPLE:\n"
+            'User: Create hello.py with hello world\n'
+            'Assistant: [fs_write(path="hello.py", content="print(\'Hello, World!\')")]<|endoftext|>\n\n'
+            "RULES:\n"
+            "1. ALWAYS use bracket notation [func(...)] to make changes\n"
+            "2. For file modifications: fs_read first, then fs_write\n"
+            "3. Quote all string parameters\n"
             "4. Continue until task is fully complete"
         )
     else:
@@ -382,7 +451,7 @@ def execute(coder_prompt: str,
         while steps < s.max_steps:
             steps += 1
             
-            # Build payload - for Qwen3 and Phi4, don't send tools in API (already in prompt)
+            # Build payload - for custom formats, don't send tools in API
             payload = {
                 "model": s.coder_model,
                 "messages": messages,
@@ -390,7 +459,7 @@ def execute(coder_prompt: str,
             }
             
             # Only add tools parameter for standard OpenAI models
-            if not use_qwen3_format and not use_phi4_format:
+            if not (use_qwen3_format or use_phi4_format or use_granite4_format):
                 payload["tools"] = tools
             
             content_chunks = []
@@ -440,6 +509,10 @@ def execute(coder_prompt: str,
                 phi4_calls = _extract_phi4_tool_calls(content)
                 if phi4_calls:
                     calls = phi4_calls
+            elif use_granite4_format and content:
+                granite4_calls = _extract_granite4_tool_calls(content)
+                if granite4_calls:
+                    calls = granite4_calls
             
             # Fallback: parse JSON tool calls from content
             if not calls and content:
