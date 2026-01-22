@@ -151,13 +151,13 @@ class CoderAgent(Agent):
         total_lines = 0
         total_functions = 0
         total_classes = 0
-        
+
         for content in files.values():
             lines = content.split('\n')
-            total_lines += len([l for l in lines if l.strip()])
+            total_lines += len(lines)
             total_functions += content.count('def ')
             total_classes += content.count('class ')
-        
+
         return {
             "total_lines": total_lines,
             "total_functions": total_functions,
@@ -435,20 +435,20 @@ class TesterAgent(Agent):
     
     def _estimate_coverage(self, code_files: Dict[str, str], tests: List[str]) -> Dict[str, Any]:
         """Estimate test coverage."""
-        if not tests:
-            return {"coverage": 0, "reason": "No tests available"}
-        
         # Simple heuristic: estimate based on function/class coverage
         total_functions = sum(content.count('def ') for content in code_files.values())
         total_classes = sum(content.count('class ') for content in code_files.values())
         total_testable = total_functions + total_classes
-        
+
         if total_testable == 0:
             return {"coverage": 100, "reason": "No testable units found"}
-        
+
+        if not tests:
+            return {"coverage": 0, "reason": "No tests available"}
+
         # Rough estimate based on number of tests vs testable units
         estimated_coverage = min(100, (len(tests) / total_testable) * 100)
-        
+
         return {
             "coverage": estimated_coverage,
             "testable_units": total_testable,
