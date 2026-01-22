@@ -5,11 +5,10 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
-
 from .config import Settings, load_settings
 from .streaming import StreamingReporter, QuietReporter
 from .enhancement import AutoEnhancementSystem
+from .backend_manager import get_backend
 from ..tools.fs import fs_read, fs_write, fs_list
 from ..tools.shell import shell_run
 from ..tools.python_exec import python_run
@@ -440,158 +439,138 @@ def execute(coder_prompt: str,
         {"role": "user", "content": coder_prompt},
     ]
 
-    url = f"{s.local_host}/api/chat"
+    print(f"[DEBUG] Using backend: {s.backend}")
+    print(f"[DEBUG] Using model: {s.coder_model}")
+
+    # Get backend
+    backend = get_backend(s)
+    
     steps = 0
     last_text = ""
 
-    print(f"[DEBUG] Executor calling: {url}")
-    print(f"[DEBUG] Using model: {s.coder_model}")
-
-    with httpx.Client(timeout=s.request_timeout_s) as cli:
-        while steps < s.max_steps:
-            steps += 1
+    while steps < s.max_steps:
+        steps += 1
+        
+        # Build tools list - for custom formats, embed in prompt instead
+        api_tools = None if (use_qwen3_format or use_phi4_format or use_granite4_format) else tools
+        
+        content_chunks = []
+        tool_calls = []
+        
+        try:
+            for response in backend.chat(messages, s.coder_model, tools=api_tools, stream=True):
+                if response.content:
+                    chunk = response.content
+                    content_chunks.append(chunk)
+                    if reporter:
+                        reporter.on_llm_chunk(chunk)
+                
+                if response.tool_calls:
+                    tool_calls = response.tool_calls
+                
+                if response.done:
+                    break
+                    
+        except Exception as e:
+            print(f"[ERROR] Backend call failed: {e}")
+            raise
+                
+        content = "".join(content_chunks)
+        last_text = content or last_text
+        calls = tool_calls
+        
+        # Extract tool calls based on model format
+        if use_qwen3_format and content:
+            qwen3_calls = _extract_qwen3_tool_calls(content)
+            if qwen3_calls:
+                calls = qwen3_calls
+        elif use_phi4_format and content:
+            phi4_calls = _extract_phi4_tool_calls(content)
+            if phi4_calls:
+                calls = phi4_calls
+        elif use_granite4_format and content:
+            granite4_calls = _extract_granite4_tool_calls(content)
+            if granite4_calls:
+                calls = granite4_calls
+        
+        # Fallback: parse JSON tool calls from content
+        if not calls and content:
+            json_content = content.strip()
             
-            # Build payload - for custom formats, don't send tools in API
-            payload = {
-                "model": s.coder_model,
-                "messages": messages,
-                "stream": True,
-            }
+            # Remove markdown code fences
+            if json_content.startswith('```json'):
+                json_content = json_content[7:]
+            elif json_content.startswith('```'):
+                json_content = json_content[3:]
+            if json_content.endswith('```'):
+                json_content = json_content[:-3]
+            json_content = json_content.strip()
             
-            # Only add tools parameter for standard OpenAI models
-            if not (use_qwen3_format or use_phi4_format or use_granite4_format):
-                payload["tools"] = tools
-            
-            content_chunks = []
-            tool_calls = []
-            done = False
-            
-            try:
-                with cli.stream("POST", url, json=payload) as resp:
-                    resp.raise_for_status()
-                    for line in resp.iter_lines():
-                        if not line:
-                            continue
-                        try:
-                            data = json.loads(line)
-                        except Exception:
-                            continue
-                        msg = data.get("message", {}) or {}
-                        chunk = msg.get("content") or ""
-                        if chunk:
-                            content_chunks.append(chunk)
-                            if reporter:
-                                reporter.on_llm_chunk(chunk)
-                        
-                        # Standard tool calls from API
-                        calls = msg.get("tool_calls") or []
-                        if calls:
-                            tool_calls = calls
-                        
-                        if data.get("done", False):
-                            done = True
+            if json_content.startswith('{"name":'):
+                # Find balanced braces
+                brace_count = 0
+                for i, char in enumerate(json_content):
+                    if char == '{':
+                        brace_count += 1
+                    elif char == '}':
+                        brace_count -= 1
+                        if brace_count == 0:
+                            json_obj = json_content[:i+1]
+                            try:
+                                tool_data = json.loads(json_obj)
+                                if "name" in tool_data and "arguments" in tool_data:
+                                    calls = [{
+                                        "function": {
+                                            "name": tool_data["name"],
+                                            "arguments": tool_data["arguments"]
+                                        }
+                                    }]
+                            except json.JSONDecodeError:
+                                pass
                             break
-                            
-            except httpx.HTTPStatusError as e:
-                print(f"[ERROR] HTTP {e.response.status_code}: {e.response.text[:200]}")
-                raise
-                    
-            content = "".join(content_chunks)
-            last_text = content or last_text
-            calls = tool_calls
-            
-            # Extract tool calls based on model format
-            if use_qwen3_format and content:
-                qwen3_calls = _extract_qwen3_tool_calls(content)
-                if qwen3_calls:
-                    calls = qwen3_calls
-            elif use_phi4_format and content:
-                phi4_calls = _extract_phi4_tool_calls(content)
-                if phi4_calls:
-                    calls = phi4_calls
-            elif use_granite4_format and content:
-                granite4_calls = _extract_granite4_tool_calls(content)
-                if granite4_calls:
-                    calls = granite4_calls
-            
-            # Fallback: parse JSON tool calls from content
-            if not calls and content:
-                json_content = content.strip()
-                
-                # Remove markdown code fences
-                if json_content.startswith('```json'):
-                    json_content = json_content[7:]
-                elif json_content.startswith('```'):
-                    json_content = json_content[3:]
-                if json_content.endswith('```'):
-                    json_content = json_content[:-3]
-                json_content = json_content.strip()
-                
-                if json_content.startswith('{"name":'):
-                    # Find balanced braces
-                    brace_count = 0
-                    for i, char in enumerate(json_content):
-                        if char == '{':
-                            brace_count += 1
-                        elif char == '}':
-                            brace_count -= 1
-                            if brace_count == 0:
-                                json_obj = json_content[:i+1]
-                                try:
-                                    tool_data = json.loads(json_obj)
-                                    if "name" in tool_data and "arguments" in tool_data:
-                                        calls = [{
-                                            "function": {
-                                                "name": tool_data["name"],
-                                                "arguments": tool_data["arguments"]
-                                            }
-                                        }]
-                                except json.JSONDecodeError:
-                                    pass
-                                break
-            
-            # Exit if no tool calls were found
-            if not calls:
-                if steps <= 2 and last_text and not any("wrote " in msg.get("content", "") for msg in messages[-3:]):
-                    continue_prompt = "Continue with the implementation. You must call tools to make actual changes."
-                    messages.append({"role": "user", "content": continue_prompt})
-                    continue
-                break
-            
-            error_occurred = False
-            for call in calls:
-                fn = (call.get("function") or {}).get("name", "")
-                raw = (call.get("function") or {}).get("arguments", "{}")
-                try:
-                    if isinstance(raw, dict):
-                        args = raw
-                    else:
-                        args = json.loads(raw) if isinstance(raw, str) else raw
-                except json.JSONDecodeError:
-                    args = {}
-                
-                result = _dispatch_tool(fn, args, reporter)
-                messages.append({"role": "tool", "content": result, "name": fn})
-                
-                # Check for errors and auto-retry
-                if result.startswith("ERROR:") or "failed" in result.lower():
-                    retry_key = f"step_{steps}_{fn}_{json.dumps(args, sort_keys=True)}"
-                    if not hasattr(execute, '_retry_counts'):
-                        execute._retry_counts = {}
-                    
-                    retry_count = execute._retry_counts.get(retry_key, 0)
-                    if retry_count < 2:
-                        execute._retry_counts[retry_key] = retry_count + 1
-                        error_fix_prompt = f"The tool call failed with error: {result}\nPlease fix the issue and try again."
-                        messages.append({"role": "user", "content": error_fix_prompt})
-                        error_occurred = True
-                        break
-                
-                # Track successful operations
-                if "wrote " in result and result.startswith("wrote "):
-                    _add_success_to_rag(coder_prompt, fn, args, result)
-            
-            if error_occurred:
+        
+        # Exit if no tool calls were found
+        if not calls:
+            if steps <= 2 and last_text and not any("wrote " in msg.get("content", "") for msg in messages[-3:]):
+                continue_prompt = "Continue with the implementation. You must call tools to make actual changes."
+                messages.append({"role": "user", "content": continue_prompt})
                 continue
+            break
+        
+        error_occurred = False
+        for call in calls:
+            fn = (call.get("function") or {}).get("name", "")
+            raw = (call.get("function") or {}).get("arguments", "{}")
+            try:
+                if isinstance(raw, dict):
+                    args = raw
+                else:
+                    args = json.loads(raw) if isinstance(raw, str) else raw
+            except json.JSONDecodeError:
+                args = {}
+            
+            result = _dispatch_tool(fn, args, reporter)
+            messages.append({"role": "tool", "content": result, "name": fn})
+            
+            # Check for errors and auto-retry
+            if result.startswith("ERROR:") or "failed" in result.lower():
+                retry_key = f"step_{steps}_{fn}_{json.dumps(args, sort_keys=True)}"
+                if not hasattr(execute, '_retry_counts'):
+                    execute._retry_counts = {}
+                
+                retry_count = execute._retry_counts.get(retry_key, 0)
+                if retry_count < 2:
+                    execute._retry_counts[retry_key] = retry_count + 1
+                    error_fix_prompt = f"The tool call failed with error: {result}\nPlease fix the issue and try again."
+                    messages.append({"role": "user", "content": error_fix_prompt})
+                    error_occurred = True
+                    break
+            
+            # Track successful operations
+            if "wrote " in result and result.startswith("wrote "):
+                _add_success_to_rag(coder_prompt, fn, args, result)
+        
+        if error_occurred:
+            continue
 
     return ExecSummary(steps=steps, last=last_text)
