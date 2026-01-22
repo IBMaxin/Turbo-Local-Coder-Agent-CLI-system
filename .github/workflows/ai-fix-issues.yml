@@ -1,0 +1,31 @@
+name: AI Fix Issues
+
+# Trigger when issues are labeled with 'ai-fix'
+on:
+  issues:
+    types: [labeled]
+
+jobs:
+  ai-fix:
+    if: github.event.label.name == 'ai-fix'
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Comment on issue
+      uses: actions/github-script@v7
+      with:
+        script: |
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: '🤖 AI is analyzing this issue and will create a fix PR shortly...\n\n@IBMaxin - Review the PR when it\'s ready!'
+          });
+    
+    - name: Trigger external AI service
+      run: |
+        echo "Issue #${{ github.event.issue.number }} needs AI fixing"
+        echo "Title: ${{ github.event.issue.title }}"
+        echo "Body: ${{ github.event.issue.body }}"
+        # This is where you'd integrate with Perplexity API or another service
+        # For now, this is a placeholder
