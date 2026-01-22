@@ -63,9 +63,9 @@ def get_plan(task: str, s: Settings | None = None, enhance: bool = True) -> Plan
             enhancement_system = AutoEnhancementSystem()
             if enhancement_system.should_use_enhancement(task):
                 enhanced_task, task_analysis = enhancement_system.enhance_task(task)
-                print(f"🧠 Task enhanced (complexity: {task_analysis.complexity.value}, type: {task_analysis.task_type.value})")
+                print(f"[ENHANCED] Task enhanced (complexity: {task_analysis.complexity.value}, type: {task_analysis.task_type.value})")
         except Exception as e:
-            print(f"⚠️ Enhancement failed, using original task: {e}")
+            print(f"[WARN] Enhancement failed, using original task: {e}")
             enhanced_task = task
     
     headers = {
