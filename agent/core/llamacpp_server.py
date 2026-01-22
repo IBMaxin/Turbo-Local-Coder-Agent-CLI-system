@@ -35,8 +35,19 @@ class LlamaCppServer:
     
     def _find_llamacpp_binary(self) -> Optional[Path]:
         """Find llama.cpp server binary."""
+        # Check environment variable first
+        env_binary = os.getenv("LLAMACPP_BINARY_PATH")
+        if env_binary:
+            binary_path = Path(env_binary)
+            if binary_path.exists():
+                self.logger.info(f"Using llama.cpp binary from LLAMACPP_BINARY_PATH: {binary_path}")
+                return binary_path
+            else:
+                self.logger.warning(f"LLAMACPP_BINARY_PATH set but file not found: {binary_path}")
+        
         # Check common locations
         possible_paths = [
+            Path("/home/bj/llama.cpp/llama-server"),  # User's location
             Path("./llama.cpp/llama-server"),
             Path("./llama-server"),
             Path("/usr/local/bin/llama-server"),
@@ -46,12 +57,14 @@ class LlamaCppServer:
         
         for path in possible_paths:
             if path.exists() and path.is_file():
+                self.logger.info(f"Found llama.cpp at {path}")
                 return path
         
         # Check PATH
         import shutil
         binary = shutil.which("llama-server")
         if binary:
+            self.logger.info(f"Found llama-server in PATH: {binary}")
             return Path(binary)
         
         return None
@@ -105,41 +118,26 @@ class LlamaCppServer:
         """Ensure llama.cpp binary exists, download if needed."""
         binary = self._find_llamacpp_binary()
         if binary:
-            self.logger.info(f"Found llama.cpp at {binary}")
             return binary
         
         self.logger.warning("llama.cpp binary not found, downloading...")
         return self._download_binary()
     
     def _ensure_model(self) -> Path:
-        """Ensure model file exists, download if needed."""
+        """Ensure model file exists."""
         if self.model_path.exists():
             self.logger.info(f"Using model: {self.model_path}")
             return self.model_path
         
-        # Auto-download from Hugging Face
-        self.logger.info(f"Model not found at {self.model_path}, downloading...")
-        
-        from huggingface_hub import hf_hub_download
-        
-        # Default to Phi-4-mini Q4_K_M
-        repo_id = "microsoft/phi-4-mini-gguf"
-        filename = "phi-4-mini-Q4_K_M.gguf"
-        
-        models_dir = Path("./models")
-        models_dir.mkdir(exist_ok=True)
-        
-        self.logger.info(f"Downloading {filename} from {repo_id}...")
-        downloaded_path = hf_hub_download(
-            repo_id=repo_id,
-            filename=filename,
-            local_dir=models_dir,
-            local_dir_use_symlinks=False
+        # Model not found
+        raise FileNotFoundError(
+            f"Model not found at {self.model_path}.\n"
+            "Please set LLAMACPP_MODEL_PATH in your .env to a valid GGUF model file.\n"
+            "Available models in /home/bj/llama.cpp/models:\n"
+            "  - Phi-3-mini-4k-instruct-q4.gguf (recommended)\n"
+            "  - SmolLM2-1.7B-Instruct-Q4_K_M.gguf\n"
+            "  - functiongemma-270m-it-Q4_K_M.gguf"
         )
-        
-        self.model_path = Path(downloaded_path)
-        self.logger.info(f"Model downloaded to {self.model_path}")
-        return self.model_path
     
     def start(self):
         """Start llama.cpp server."""
@@ -158,19 +156,25 @@ class LlamaCppServer:
             "--port", str(self.port),
             "--host", "127.0.0.1",
             "-c", str(self.settings.llamacpp_context_size),
+            "--log-disable",  # Reduce log spam
         ]
         
         # Add Vulkan support
         if self.settings.llamacpp_use_vulkan:
             cmd.extend(["-ngl", str(self.settings.llamacpp_n_gpu_layers)])
             self.logger.info(f"Enabling Vulkan with {self.settings.llamacpp_n_gpu_layers} GPU layers")
+        else:
+            self.logger.info("Running in CPU-only mode")
         
         # Set environment
         env = os.environ.copy()
         if self.settings.llamacpp_use_vulkan:
             env["GGML_VULKAN_DEVICE"] = "0"
+            # For AMD Renoir
+            env["HSA_OVERRIDE_GFX_VERSION"] = "9.0.0"
         
-        self.logger.info(f"Starting llama.cpp server: {' '.join(cmd)}")
+        self.logger.info(f"Starting llama.cpp server...")
+        self.logger.debug(f"Command: {' '.join(cmd)}")
         
         # Start process
         self.process = subprocess.Popen(
@@ -186,13 +190,18 @@ class LlamaCppServer:
         for i in range(30):
             time.sleep(1)
             if self.is_running():
-                self.logger.info(f"llama.cpp server ready on port {self.port}")
+                self.logger.info(f"✅ llama.cpp server ready on port {self.port}")
+                self.logger.info(f"Model: {model.name}")
                 return
         
         # Check if process crashed
         if self.process.poll() is not None:
             stdout, stderr = self.process.communicate()
-            raise RuntimeError(f"llama.cpp server failed to start:\nSTDOUT: {stdout}\nSTDERR: {stderr}")
+            raise RuntimeError(
+                f"llama.cpp server failed to start:\n"
+                f"STDOUT: {stdout[-500:] if stdout else 'empty'}\n"
+                f"STDERR: {stderr[-500:] if stderr else 'empty'}"
+            )
         
         raise RuntimeError("llama.cpp server did not respond in time")
     
