@@ -88,32 +88,45 @@ def get_plan(task: str, s: Settings | None = None, enhance: bool = True, force_l
     backend = get_backend(s)
     
     try:
-        content_parts = []
+        # For non-streaming, we should get one complete response
+        # But iterate through all responses to handle both cases
+        final_content = ""
         for response in backend.chat(messages, s.planner_model, tools=[], stream=False):
             if response.content:
-                content_parts.append(response.content)
-            if response.done:
-                break
+                # For non-streaming, the last response with done=True has full content
+                if response.done:
+                    final_content = response.content
+                    break
+                else:
+                    # Shouldn't happen with stream=False, but handle it
+                    final_content += response.content
         
-        content = "".join(content_parts)
+        content = final_content
+        
+        if not content:
+            raise ValueError("planner returned empty content")
         
     except Exception as e:
         print(f"[ERROR] Backend request failed: {e}")
         raise
     
-    # Handle case where model returns tool calls instead of content
-    if not content:
-        raise ValueError(
-            f"planner returned empty content. "
-            f"Make sure the planner model is configured to return JSON only, not tool calls."
-        )
+    print(f"[DEBUG] Received content length: {len(content)} chars")
+    print(f"[DEBUG] Content preview: {content[:100]}...{content[-100:] if len(content) > 200 else ''}")
     
     content = _strip_code_fences(content)
+    
+    # Validate JSON is complete before parsing
+    if not content.strip().endswith('}'):
+        print(f"[WARN] JSON appears incomplete (doesn't end with }}). Content: {content[-200:]}")
+    
     try:
         parsed: dict[str, Any] = json.loads(content)
     except json.JSONDecodeError as exc:
-        print(f"[ERROR] Failed to parse JSON. Content: {content[:500]}")
-        raise ValueError(f"planner returned non-JSON: {exc}\n{content}") from exc
+        print(f"[ERROR] Failed to parse JSON. Content length: {len(content)}")
+        print(f"[ERROR] Content start: {content[:200]}")
+        print(f"[ERROR] Content end: {content[-200:]}")
+        print(f"[ERROR] Parse error: {exc}")
+        raise ValueError(f"planner returned non-JSON: {exc}\n{content[:500]}") from exc
 
     plan = parsed.get("plan") or []
     coder_prompt = parsed.get("coder_prompt") or ""
