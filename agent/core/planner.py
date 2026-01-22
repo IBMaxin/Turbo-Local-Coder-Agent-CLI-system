@@ -52,7 +52,15 @@ def _strip_code_fences(text: str) -> str:
     return result
 
 
-def get_plan(task: str, s: Settings | None = None, enhance: bool = True) -> Plan:
+def get_plan(task: str, s: Settings | None = None, enhance: bool = True, force_local: bool = True) -> Plan:
+    """Get a plan from the planner model.
+    
+    Args:
+        task: The task description
+        s: Settings object (will load from env if None)
+        enhance: Whether to use task enhancement
+        force_local: If True, uses local_host instead of turbo_host (default: True)
+    """
     s = s or load_settings()
     
     # Apply auto-enhancement if requested
@@ -81,11 +89,26 @@ def get_plan(task: str, s: Settings | None = None, enhance: bool = True) -> Plan
         "stream": False,
         "tools": [],  # Explicitly disable tools for planner
     }
-    url = f"{s.turbo_host}/api/chat"
+    
+    # Use local_host by default for local-only operation
+    api_host = s.local_host if force_local else s.turbo_host
+    url = f"{api_host}/api/chat"
+    
+    print(f"[DEBUG] Calling planner at: {url}")
+    print(f"[DEBUG] Using model: {s.planner_model}")
+    
     with httpx.Client(timeout=s.request_timeout_s) as cli:
-        resp = cli.post(url, headers=headers, json=body)
-        resp.raise_for_status()
-        data = resp.json()
+        try:
+            resp = cli.post(url, headers=headers, json=body)
+            resp.raise_for_status()
+            data = resp.json()
+        except httpx.HTTPError as e:
+            print(f"[ERROR] HTTP request failed: {e}")
+            print(f"[ERROR] URL: {url}")
+            print(f"[ERROR] Status code: {getattr(e.response, 'status_code', 'N/A')}")
+            if hasattr(e, 'response') and e.response:
+                print(f"[ERROR] Response: {e.response.text[:500]}")
+            raise
 
     content = data.get("message", {}).get("content", "")
     
@@ -97,10 +120,15 @@ def get_plan(task: str, s: Settings | None = None, enhance: bool = True) -> Plan
             f"Make sure the planner model is configured to return JSON only, not tool calls."
         )
     
+    if not content:
+        print(f"[ERROR] Empty content from model. Full response: {data}")
+        raise ValueError(f"planner returned empty content. Response: {data}")
+    
     content = _strip_code_fences(content)
     try:
         parsed: dict[str, Any] = json.loads(content)
     except json.JSONDecodeError as exc:
+        print(f"[ERROR] Failed to parse JSON. Content: {content[:500]}")
         raise ValueError(f"planner returned non-JSON: {exc}\n{content}") from exc
 
     plan = parsed.get("plan") or []
