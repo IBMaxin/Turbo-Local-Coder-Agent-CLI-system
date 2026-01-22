@@ -56,7 +56,7 @@ class CodingWorkflow:
         
         try:
             # Step 1: Planning
-            print("🧠 Planning phase...")
+            print("[PLAN] Planning phase...")
             plan_result = self._execute_planning_phase(description)
             if not plan_result:
                 result.errors.append("Planning phase failed")
@@ -66,7 +66,7 @@ class CodingWorkflow:
             result.task_id = plan_result.get("task_id", "")
             
             # Step 2: Coding
-            print("💻 Coding phase...")
+            print("[CODE] Coding phase...")
             code_result = self._execute_coding_phase(plan_result)
             if not code_result:
                 result.errors.append("Coding phase failed")
@@ -76,7 +76,7 @@ class CodingWorkflow:
             
             # Step 3: Review (optional)
             if not skip_review:
-                print("👀 Review phase...")
+                print("[REVIEW] Review phase...")
                 review_result = self._execute_review_phase(code_result)
                 if review_result:
                     result.review = review_result
@@ -85,7 +85,7 @@ class CodingWorkflow:
             
             # Step 4: Testing (optional)
             if not skip_testing:
-                print("🧪 Testing phase...")
+                print("[TEST] Testing phase...")
                 test_result = self._execute_testing_phase(
                     code_result, 
                     plan_result.get("suggested_tests", [])
@@ -221,37 +221,37 @@ class CodingWorkflow:
     def get_workflow_summary(self, result: WorkflowResult) -> str:
         """Generate a human-readable workflow summary."""
         summary = [
-            f"🎯 Workflow Result: {'✅ SUCCESS' if result.success else '❌ FAILED'}",
-            f"⏱️  Total Time: {result.total_time:.2f} seconds",
-            f"🆔 Task ID: {result.task_id}",
+            f"[RESULT] Workflow Result: {'[OK] SUCCESS' if result.success else '[FAIL] FAILED'}",
+            f"[TIME] Total Time: {result.total_time:.2f} seconds",
+            f"[ID] Task ID: {result.task_id}",
             ""
         ]
         
         if result.plan:
             plan_steps = len(result.plan.get("plan_steps", []))
-            summary.append(f"📋 Planning: {plan_steps} steps generated")
+            summary.append(f"[PLAN] Planning: {plan_steps} steps generated")
         
         if result.code:
             files = result.code.get("generated_files", {})
             lines = result.code.get("code_metrics", {}).get("total_lines", 0)
-            summary.append(f"💻 Coding: {len(files)} files, {lines} lines")
+            summary.append(f"[CODE] Coding: {len(files)} files, {lines} lines")
         
         if result.review:
             score = result.review.get("overall_score", 0)
             issues = result.review.get("total_issues", 0)
             approved = result.review.get("approved", False)
-            status = "✅ APPROVED" if approved else "⚠️ NEEDS WORK"
-            summary.append(f"👀 Review: {score:.1f}/10 score, {issues} issues ({status})")
+            status = "[OK] APPROVED" if approved else "[WARN] NEEDS WORK"
+            summary.append(f"[REVIEW] Review: {score:.1f}/10 score, {issues} issues ({status})")
         
         if result.tests:
             success = result.tests.get("overall_success", False)
             coverage = result.tests.get("coverage_estimate", {}).get("coverage", 0)
-            status = "✅ PASSED" if success else "❌ FAILED" 
-            summary.append(f"🧪 Testing: {status}, ~{coverage:.0f}% coverage")
+            status = "[OK] PASSED" if success else "[FAIL] FAILED" 
+            summary.append(f"[TEST] Testing: {status}, ~{coverage:.0f}% coverage")
         
         if result.errors:
             summary.append("")
-            summary.append("❌ Errors:")
+            summary.append("[ERR] Errors:")
             for error in result.errors:
                 summary.append(f"   • {error}")
         
@@ -260,7 +260,7 @@ class CodingWorkflow:
 
 def demo_workflow():
     """Demonstration of the complete workflow."""
-    print("🚀 Initializing Coding Agent Team Workflow")
+    print("[EXEC] Initializing Coding Agent Team Workflow")
     print("=" * 50)
     
     workflow = CodingWorkflow()
@@ -268,7 +268,7 @@ def demo_workflow():
     # Example coding task
     task_description = "Create a Python function that calculates the fibonacci sequence recursively and iteratively, with error handling for negative inputs"
     
-    print(f"📝 Task: {task_description}")
+    print(f"[TASK] Task: {task_description}")
     print()
     
     # Execute workflow
