@@ -1,0 +1,136 @@
+name: Tests and Coverage
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12', '3.13']
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Cache pip packages
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('requirements*.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pytest pytest-cov pytest-mock black ruff
+        pip install -e .
+    
+    - name: Lint with ruff
+      run: |
+        ruff check agent/ tests/ --output-format=github
+      continue-on-error: true
+    
+    - name: Check formatting with black
+      run: |
+        black --check agent/ tests/
+      continue-on-error: true
+    
+    - name: Run tests with coverage
+      run: |
+        pytest --cov=agent --cov-report=xml --cov-report=term-missing --cov-fail-under=75
+    
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v4
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+        fail_ci_if_error: false
+      continue-on-error: true
+    
+    - name: Generate coverage badge
+      if: matrix.python-version == '3.13'
+      run: |
+        COVERAGE=$(python -c "import xml.etree.ElementTree as ET; tree = ET.parse('coverage.xml'); root = tree.getroot(); print(int(float(root.attrib['line-rate']) * 100))")
+        echo "Coverage: ${COVERAGE}%"
+        echo "COVERAGE=${COVERAGE}" >> $GITHUB_ENV
+        
+        # Determine badge color
+        if [ "$COVERAGE" -ge 85 ]; then
+          COLOR="brightgreen"
+        elif [ "$COVERAGE" -ge 70 ]; then
+          COLOR="green"
+        elif [ "$COVERAGE" -ge 50 ]; then
+          COLOR="yellow"
+        else
+          COLOR="red"
+        fi
+        echo "BADGE_COLOR=${COLOR}" >> $GITHUB_ENV
+    
+    - name: Comment coverage on PR
+      if: github.event_name == 'pull_request' && matrix.python-version == '3.13'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const coverage = process.env.COVERAGE;
+          const color = process.env.BADGE_COLOR;
+          
+          const comment = `## Test Coverage Report
+          
+          ![Coverage](https://img.shields.io/badge/coverage-${coverage}%25-${color})
+          
+          **Target:** 85%
+          **Current:** ${coverage}%
+          
+          ${coverage >= 85 ? '✅ Coverage target met!' : '⚠️ Coverage below target'}
+          `;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: comment
+          });
+
+  auto-format:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.head_ref }}
+        token: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.13'
+    
+    - name: Install formatting tools
+      run: |
+        pip install black ruff
+    
+    - name: Auto-format code
+      run: |
+        black agent/ tests/
+        ruff check agent/ tests/ --fix
+    
+    - name: Commit changes
+      run: |
+        git config --local user.email "github-actions[bot]@users.noreply.github.com"
+        git config --local user.name "github-actions[bot]"
+        git add -A
+        git diff --quiet && git diff --staged --quiet || git commit -m "[AUTO] Apply automatic formatting"
+        git push
+      continue-on-error: true
