@@ -57,43 +57,60 @@ class OllamaBackend(BaseBackend):
         if tools:
             payload["tools"] = tools
         
-        self.logger.debug(f"Ollama request to {url} with model {model}")
+        self.logger.debug(f"Ollama request to {url} with model {model}, stream={stream}")
         
         with httpx.Client(timeout=self.settings.request_timeout_s) as client:
-            with client.stream("POST", url, json=payload) as resp:
+            if not stream:
+                # Non-streaming mode - get complete response
+                resp = client.post(url, json=payload)
                 resp.raise_for_status()
+                data = resp.json()
                 
-                content_chunks = []
-                tool_calls = []
+                msg = data.get("message", {}) or {}
+                content = msg.get("content") or ""
+                tool_calls = msg.get("tool_calls") or []
                 
-                for line in resp.iter_lines():
-                    if not line:
-                        continue
+                yield ChatResponse(
+                    content=content,
+                    tool_calls=tool_calls if tool_calls else None,
+                    done=True
+                )
+            else:
+                # Streaming mode
+                with client.stream("POST", url, json=payload) as resp:
+                    resp.raise_for_status()
                     
-                    try:
-                        data = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
+                    content_chunks = []
+                    tool_calls = []
                     
-                    msg = data.get("message", {}) or {}
-                    chunk = msg.get("content") or ""
-                    
-                    if chunk:
-                        content_chunks.append(chunk)
-                        yield ChatResponse(content=chunk, done=False)
-                    
-                    calls = msg.get("tool_calls") or []
-                    if calls:
-                        tool_calls = calls
-                    
-                    if data.get("done", False):
-                        final_content = "".join(content_chunks)
-                        yield ChatResponse(
-                            content=final_content,
-                            tool_calls=tool_calls if tool_calls else None,
-                            done=True
-                        )
-                        break
+                    for line in resp.iter_lines():
+                        if not line:
+                            continue
+                        
+                        try:
+                            data = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        
+                        msg = data.get("message", {}) or {}
+                        chunk = msg.get("content") or ""
+                        
+                        if chunk:
+                            content_chunks.append(chunk)
+                            yield ChatResponse(content=chunk, done=False)
+                        
+                        calls = msg.get("tool_calls") or []
+                        if calls:
+                            tool_calls = calls
+                        
+                        if data.get("done", False):
+                            final_content = "".join(content_chunks)
+                            yield ChatResponse(
+                                content=final_content,
+                                tool_calls=tool_calls if tool_calls else None,
+                                done=True
+                            )
+                            break
     
     def is_available(self) -> bool:
         """Check if Ollama is running."""
@@ -153,51 +170,70 @@ class LlamaCppBackend(BaseBackend):
         if tools:
             payload["tools"] = tools
         
-        self.logger.debug(f"llama.cpp request to {url}")
+        self.logger.debug(f"llama.cpp request to {url}, stream={stream}")
         
         with httpx.Client(timeout=self.settings.request_timeout_s) as client:
-            with client.stream("POST", url, json=payload) as resp:
+            if not stream:
+                # Non-streaming mode
+                resp = client.post(url, json=payload)
                 resp.raise_for_status()
+                data = resp.json()
                 
-                content_chunks = []
-                tool_calls = []
-                
-                for line in resp.iter_lines():
-                    if not line or not line.startswith("data: "):
-                        continue
+                choices = data.get("choices", [])
+                if choices:
+                    message = choices[0].get("message", {})
+                    content = message.get("content") or ""
+                    tool_calls = message.get("tool_calls") or []
                     
-                    line = line[6:]  # Remove "data: " prefix
-                    if line == "[DONE]":
-                        break
+                    yield ChatResponse(
+                        content=content,
+                        tool_calls=tool_calls if tool_calls else None,
+                        done=True
+                    )
+            else:
+                # Streaming mode
+                with client.stream("POST", url, json=payload) as resp:
+                    resp.raise_for_status()
                     
-                    try:
-                        data = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
+                    content_chunks = []
+                    tool_calls = []
                     
-                    choices = data.get("choices", [])
-                    if not choices:
-                        continue
-                    
-                    delta = choices[0].get("delta", {})
-                    chunk = delta.get("content") or ""
-                    
-                    if chunk:
-                        content_chunks.append(chunk)
-                        yield ChatResponse(content=chunk, done=False)
-                    
-                    # Check for tool calls
-                    if "tool_calls" in delta:
-                        tool_calls = delta["tool_calls"]
-                    
-                    if choices[0].get("finish_reason") == "stop":
-                        final_content = "".join(content_chunks)
-                        yield ChatResponse(
-                            content=final_content,
-                            tool_calls=tool_calls if tool_calls else None,
-                            done=True
-                        )
-                        break
+                    for line in resp.iter_lines():
+                        if not line or not line.startswith("data: "):
+                            continue
+                        
+                        line = line[6:]  # Remove "data: " prefix
+                        if line == "[DONE]":
+                            break
+                        
+                        try:
+                            data = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        
+                        choices = data.get("choices", [])
+                        if not choices:
+                            continue
+                        
+                        delta = choices[0].get("delta", {})
+                        chunk = delta.get("content") or ""
+                        
+                        if chunk:
+                            content_chunks.append(chunk)
+                            yield ChatResponse(content=chunk, done=False)
+                        
+                        # Check for tool calls
+                        if "tool_calls" in delta:
+                            tool_calls = delta["tool_calls"]
+                        
+                        if choices[0].get("finish_reason") == "stop":
+                            final_content = "".join(content_chunks)
+                            yield ChatResponse(
+                                content=final_content,
+                                tool_calls=tool_calls if tool_calls else None,
+                                done=True
+                            )
+                            break
     
     def is_available(self) -> bool:
         """Check if llama.cpp server is running."""
