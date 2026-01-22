@@ -190,7 +190,7 @@ def execute_enhanced_workflow(task: str, settings: Settings, reporter,
         
     except ImportError:
         # Fallback to standard workflow with warnings
-        print("[yellow]⚠️  Team workflow not available, falling back to standard workflow[/yellow]")
+        print("[yellow][WARN]  Team workflow not available, falling back to standard workflow[/yellow]")
         return execute_standard_workflow(task, settings, reporter)
 
 
