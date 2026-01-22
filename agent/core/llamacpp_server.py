@@ -5,6 +5,8 @@ import logging
 import os
 import subprocess
 import time
+import signal
+import atexit
 import requests
 from pathlib import Path
 from typing import Optional
@@ -13,7 +15,9 @@ from .config import Settings
 
 
 class LlamaCppServer:
-    """Manages llama.cpp server process."""
+    """Manages llama.cpp server process with optimizations."""
+    
+    _instance: Optional['LlamaCppServer'] = None
     
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -22,16 +26,34 @@ class LlamaCppServer:
         self.port = settings.llamacpp_port
         self.model_path = Path(settings.llamacpp_model_path)
         
+        # Register cleanup on exit
+        if LlamaCppServer._instance is None:
+            LlamaCppServer._instance = self
+            atexit.register(self._cleanup)
+            signal.signal(signal.SIGTERM, self._signal_handler)
+            signal.signal(signal.SIGINT, self._signal_handler)
+    
+    def _signal_handler(self, signum, frame):
+        """Handle shutdown signals gracefully."""
+        self.logger.info(f"Received signal {signum}, shutting down...")
+        self.stop()
+    
+    def _cleanup(self):
+        """Cleanup on exit."""
+        if self.process:
+            self.stop()
+    
     def is_running(self) -> bool:
         """Check if server is running and responding."""
-        if self.process and self.process.poll() is None:
-            # Process exists, check if responding
-            try:
-                resp = requests.get(f"http://127.0.0.1:{self.port}/health", timeout=2)
-                return resp.status_code == 200
-            except Exception:
-                return False
-        return False
+        if not self.process or self.process.poll() is not None:
+            return False
+        
+        # Quick health check
+        try:
+            resp = requests.get(f"http://127.0.0.1:{self.port}/health", timeout=1)
+            return resp.status_code == 200
+        except (requests.RequestException, ConnectionError):
+            return False
     
     def _find_llamacpp_binary(self) -> Optional[Path]:
         """Find llama.cpp server binary."""
@@ -40,14 +62,13 @@ class LlamaCppServer:
         if env_binary:
             binary_path = Path(env_binary)
             if binary_path.exists():
-                self.logger.info(f"Using llama.cpp binary from LLAMACPP_BINARY_PATH: {binary_path}")
+                self.logger.info(f"Using binary from LLAMACPP_BINARY_PATH: {binary_path}")
                 return binary_path
-            else:
-                self.logger.warning(f"LLAMACPP_BINARY_PATH set but file not found: {binary_path}")
         
         # Check common locations
         possible_paths = [
-            Path("/home/bj/llama.cpp/llama-server"),  # User's location
+            Path("/home/bj/llama.cpp/llama-server"),
+            Path("/home/bj/llama.cpp/build/bin/llama-server"),
             Path("./llama.cpp/llama-server"),
             Path("./llama-server"),
             Path("/usr/local/bin/llama-server"),
@@ -69,59 +90,16 @@ class LlamaCppServer:
         
         return None
     
-    def _download_binary(self) -> Path:
-        """Download pre-built llama.cpp binary with Vulkan support."""
-        self.logger.info("Downloading llama.cpp binary with Vulkan support...")
-        
-        import platform
-        import urllib.request
-        import tarfile
-        
-        system = platform.system().lower()
-        arch = platform.machine().lower()
-        
-        # Map to release names
-        if system == "linux" and "x86_64" in arch:
-            release_name = "llama-b4455-bin-ubuntu-x64-vulkan.zip"
-        else:
-            raise RuntimeError(f"No pre-built binary for {system} {arch}. Please build llama.cpp manually.")
-        
-        url = f"https://github.com/ggerganov/llama.cpp/releases/latest/download/{release_name}"
-        
-        download_dir = Path("./llama.cpp")
-        download_dir.mkdir(exist_ok=True)
-        
-        archive_path = download_dir / release_name
-        
-        self.logger.info(f"Downloading from {url}...")
-        urllib.request.urlretrieve(url, archive_path)
-        
-        # Extract
-        self.logger.info("Extracting...")
-        if archive_path.suffix == ".zip":
-            import zipfile
-            with zipfile.ZipFile(archive_path, 'r') as zip_ref:
-                zip_ref.extractall(download_dir)
-        else:
-            with tarfile.open(archive_path) as tar:
-                tar.extractall(download_dir)
-        
-        binary_path = download_dir / "llama-server"
-        if binary_path.exists():
-            binary_path.chmod(0o755)
-            self.logger.info(f"Binary installed to {binary_path}")
-            return binary_path
-        
-        raise RuntimeError("Failed to extract llama-server binary")
-    
     def _ensure_binary(self) -> Path:
-        """Ensure llama.cpp binary exists, download if needed."""
+        """Ensure llama.cpp binary exists."""
         binary = self._find_llamacpp_binary()
-        if binary:
-            return binary
-        
-        self.logger.warning("llama.cpp binary not found, downloading...")
-        return self._download_binary()
+        if not binary:
+            raise FileNotFoundError(
+                "llama-server binary not found. Install it at:\n"
+                "  /home/bj/llama.cpp/llama-server\n"
+                "Or set LLAMACPP_BINARY_PATH environment variable."
+            )
+        return binary
     
     def _ensure_model(self) -> Path:
         """Ensure model file exists."""
@@ -129,18 +107,16 @@ class LlamaCppServer:
             self.logger.info(f"Using model: {self.model_path}")
             return self.model_path
         
-        # Model not found
         raise FileNotFoundError(
             f"Model not found at {self.model_path}.\n"
-            "Please set LLAMACPP_MODEL_PATH in your .env to a valid GGUF model file.\n"
-            "Available models in /home/bj/llama.cpp/models:\n"
-            "  - Phi-3-mini-4k-instruct-q4.gguf (recommended)\n"
-            "  - SmolLM2-1.7B-Instruct-Q4_K_M.gguf\n"
-            "  - functiongemma-270m-it-Q4_K_M.gguf"
+            "Available models:\n"
+            "  - /home/bj/models/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf\n"
+            "  - /home/bj/models/Phi-3-mini-4k-instruct-q4.gguf\n"
+            "Set LLAMACPP_MODEL_PATH in .env to the correct path."
         )
     
     def start(self):
-        """Start llama.cpp server."""
+        """Start llama.cpp server with optimizations."""
         if self.is_running():
             self.logger.info("llama.cpp server already running")
             return
@@ -149,7 +125,7 @@ class LlamaCppServer:
         binary = self._ensure_binary()
         model = self._ensure_model()
         
-        # Build command
+        # Build optimized command
         cmd = [
             str(binary),
             "-m", str(model),
@@ -157,64 +133,80 @@ class LlamaCppServer:
             "--host", "127.0.0.1",
             "-c", str(self.settings.llamacpp_context_size),
             "--log-disable",  # Reduce log spam
+            "-fa",  # Flash attention (faster)
+            "-cb",  # Continuous batching
+            "--cache-prompt",  # Cache prompts for speed
+            "-np", "4",  # Parallel requests
         ]
         
-        # Add Vulkan support
+        # Add GPU layers if Vulkan enabled
         if self.settings.llamacpp_use_vulkan:
             cmd.extend(["-ngl", str(self.settings.llamacpp_n_gpu_layers)])
-            self.logger.info(f"Enabling Vulkan with {self.settings.llamacpp_n_gpu_layers} GPU layers")
+            self.logger.info(f"🔥 Vulkan enabled: {self.settings.llamacpp_n_gpu_layers} GPU layers")
         else:
-            self.logger.info("Running in CPU-only mode")
+            self.logger.info("💻 CPU-only mode")
         
         # Set environment
         env = os.environ.copy()
         if self.settings.llamacpp_use_vulkan:
             env["GGML_VULKAN_DEVICE"] = "0"
-            # For AMD Renoir
-            env["HSA_OVERRIDE_GFX_VERSION"] = "9.0.0"
+            env["HSA_OVERRIDE_GFX_VERSION"] = "9.0.0"  # AMD Renoir fix
         
-        self.logger.info(f"Starting llama.cpp server...")
+        self.logger.info("Starting llama.cpp server...")
         self.logger.debug(f"Command: {' '.join(cmd)}")
         
         # Start process
-        self.process = subprocess.Popen(
-            cmd,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
+        try:
+            self.process = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=subprocess.DEVNULL,  # Suppress output
+                stderr=subprocess.PIPE,
+                text=True
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to start llama.cpp: {e}")
         
         # Wait for server to be ready
-        self.logger.info("Waiting for server to start...")
+        self.logger.info("Waiting for server startup...")
         for i in range(30):
             time.sleep(1)
             if self.is_running():
-                self.logger.info(f"✅ llama.cpp server ready on port {self.port}")
-                self.logger.info(f"Model: {model.name}")
+                self.logger.info(f"✅ llama.cpp ready on port {self.port}")
+                self.logger.info(f"📦 Model: {model.name}")
                 return
+            
+            # Check if process crashed
+            if self.process.poll() is not None:
+                _, stderr = self.process.communicate()
+                raise RuntimeError(
+                    f"llama.cpp crashed during startup:\n"
+                    f"Error: {stderr[-1000:] if stderr else 'No error output'}"
+                )
         
-        # Check if process crashed
-        if self.process.poll() is not None:
-            stdout, stderr = self.process.communicate()
-            raise RuntimeError(
-                f"llama.cpp server failed to start:\n"
-                f"STDOUT: {stdout[-500:] if stdout else 'empty'}\n"
-                f"STDERR: {stderr[-500:] if stderr else 'empty'}"
-            )
-        
-        raise RuntimeError("llama.cpp server did not respond in time")
+        # Timeout
+        self.stop()
+        raise RuntimeError("llama.cpp server did not start within 30 seconds")
     
     def stop(self):
-        """Stop llama.cpp server."""
-        if self.process:
-            self.logger.info("Stopping llama.cpp server...")
+        """Stop llama.cpp server gracefully."""
+        if not self.process:
+            return
+        
+        self.logger.info("Stopping llama.cpp server...")
+        
+        try:
+            # Try graceful shutdown first
             self.process.terminate()
-            try:
-                self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.logger.warning("Force killing llama.cpp server")
-                self.process.kill()
-                self.process.wait()
+            self.process.wait(timeout=5)
+            self.logger.info("Server stopped gracefully")
+        except subprocess.TimeoutExpired:
+            # Force kill if needed
+            self.logger.warning("Force killing server...")
+            self.process.kill()
+            self.process.wait()
+            self.logger.info("Server force stopped")
+        except Exception as e:
+            self.logger.error(f"Error stopping server: {e}")
+        finally:
             self.process = None
-            self.logger.info("llama.cpp server stopped")
