@@ -48,7 +48,7 @@ class ToolSchema(TypedDict):
 # Compatibility types expected by legacy executor modules
 # ---------------------------------------------------------------------------
 
-@dataclass
+@dataclass(frozen=True)
 class ExecSummary:
     """Summary returned by the tool-loop executor."""
 
@@ -81,9 +81,14 @@ def sanitize_path(path: str) -> str:
     p = path.strip().replace("\x00", "")
 
     if p.startswith(("/", "\\")):
-        raise ValueError("Absolute paths are not allowed")
-    if ".." in p.split("/"):
-        raise ValueError("Path traversal is not allowed")
+        raise ValueError("Invalid path")
+    if ".." in p.split("/") or ".." in p.split("\\"):
+        raise ValueError("Invalid path")
+    
+    # Check for invalid characters
+    invalid_chars = [";", "|", "&", "$", "`", "<", ">"]
+    if any(char in p for char in invalid_chars):
+        raise ValueError("invalid characters")
 
     return p
 
@@ -101,7 +106,12 @@ def sanitize_command(cmd: str) -> str:
 
     banned = [";", "&&", "||", "|", "`", "$(", ">", "<"]
     if any(tok in c for tok in banned):
-        raise ValueError("Command contains disallowed shell operators")
+        raise ValueError("dangerous pattern")
+    
+    # Check for dangerous commands
+    dangerous_cmds = ["rm -rf", "eval ", "exec "]
+    if any(cmd in c.lower() for cmd in dangerous_cmds):
+        raise ValueError("dangerous pattern")
 
     return c
 

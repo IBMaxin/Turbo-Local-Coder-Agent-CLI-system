@@ -168,16 +168,20 @@ class Granite4Formatter(ModelToolFormatter):
     def extract_calls(self, content: str) -> list[ToolCall]:
         """Extract tool calls from Granite4's bracket notation."""
         tool_calls: list[ToolCall] = []
-        pattern = r"\[(\w+)\((.*?)\)\]"
+        pattern = r'\[(\w+)\((.*?)\)\]'
         matches = re.findall(pattern, content)
 
         for func_name, args_str in matches:
             try:
                 arguments: dict[str, Any] = {}
                 if args_str.strip():
-                    arg_pattern = r'(\w+)\s*=\s*(["\'](.*?)\2|[^,]+)'
-                    arg_matches = re.findall(arg_pattern, args_str)
-                    for param, _, value in arg_matches:
+                    # Handle quoted parameters correctly
+                    arg_pattern = r'(\w+)\s*=\s*(?:"([^"\\]*(?:\\.[^"\\]*)*)"|\'([^\'\\]*(?:\\.[^\'\\]*)*)\'|([^\s,]+))'
+                    arg_matches = re.findall(arg_pattern, args_str.strip())
+                    for param, quoted_value1, quoted_value2, unquoted_value in arg_matches:
+                        value = quoted_value1 or quoted_value2 or unquoted_value
+                        # Strip any remaining quotes
+                        value = value.strip('\'"')
                         arguments[param] = value
 
                 tool_calls.append({
@@ -186,7 +190,7 @@ class Granite4Formatter(ModelToolFormatter):
                         "arguments": arguments,
                     }
                 })
-            except Exception:
+            except Exception as e:
                 continue
 
         return tool_calls

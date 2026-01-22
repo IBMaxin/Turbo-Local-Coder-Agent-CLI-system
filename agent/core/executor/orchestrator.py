@@ -95,14 +95,14 @@ def execute(
         
         content = "".join(content_chunks)
         last_text = content or last_text
-        
+
         # Extract tool calls from content or use API-provided
         calls = tool_calls_from_api if tool_calls_from_api else formatter.extract_calls(content)
-        
+
         # Exit if no tool calls
         if not calls:
             # Try to encourage tool usage on early steps
-            if steps <= 2 and last_text and not _has_tool_results(messages):
+            if steps <= 2 and not content_chunks and not _has_tool_results(messages):
                 messages.append({
                     "role": "user",
                     "content": "Continue with the implementation. You must call tools to make actual changes.",
