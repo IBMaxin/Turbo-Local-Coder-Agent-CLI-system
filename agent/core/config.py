@@ -118,7 +118,12 @@ class Settings:
         }
 
 
-# ConfigurationError now imported from errors module
+def _strip_inline_comment(value: str) -> str:
+    """Remove inline comments from env values."""
+    # Find comment marker '#' and strip everything after it
+    if '#' in value:
+        value = value.split('#', 1)[0]
+    return value.strip()
 
 
 def _load_env_file(env_path: Path) -> Dict[str, str]:
@@ -139,7 +144,8 @@ def _load_env_file(env_path: Path) -> Dict[str, str]:
                 continue
             
             key, val = line.split("=", 1)
-            key, val = key.strip(), val.strip()
+            key = key.strip()
+            val = _strip_inline_comment(val)  # Strip inline comments
             
             if not key:
                 logging.warning(f"Empty key on line {line_num} in {env_path}")
