@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -101,6 +102,36 @@ def _tool_schema() -> list[dict[str, Any]]:
     ]
 
 
+def _format_tools_for_qwen3(tools: list[dict]) -> str:
+    """Format tools in Qwen3's expected XML format."""
+    tools_json = json.dumps(tools, indent=2)
+    return f"<tools>\n{tools_json}\n</tools>"
+
+
+def _extract_qwen3_tool_calls(content: str) -> list[dict]:
+    """Extract tool calls from Qwen3's XML format: <tool_call>{...}</tool_call>"""
+    tool_calls = []
+    
+    # Pattern to match <tool_call>...</tool_call>
+    pattern = r'<tool_call>\s*({.*?})\s*</tool_call>'
+    matches = re.findall(pattern, content, re.DOTALL)
+    
+    for match in matches:
+        try:
+            tool_data = json.loads(match)
+            # Convert to standard format
+            tool_calls.append({
+                "function": {
+                    "name": tool_data.get("name", ""),
+                    "arguments": tool_data.get("arguments", {})
+                }
+            })
+        except json.JSONDecodeError:
+            continue
+    
+    return tool_calls
+
+
 def _dispatch_tool(name: str, args: dict[str, Any], reporter: StreamingReporter | QuietReporter = None) -> str:
     if reporter:
         reporter.on_tool_call(name, args)
@@ -167,7 +198,6 @@ def _add_success_to_rag(original_prompt: str, tool_name: str, args: dict, result
         import hashlib
         import time
         
-        # Create a knowledge chunk from the successful execution pattern
         task_type = _classify_task_type(original_prompt)
         file_ext = _extract_file_extension(args.get('path', ''))
         
@@ -196,12 +226,10 @@ This pattern worked for: {task_type} tasks involving {file_ext} files."""
         
         _rag_kb.add_knowledge(chunk)
     except Exception:
-        # Don't fail execution if RAG tracking fails
         pass
 
 
 def _classify_task_type(prompt: str) -> str:
-    """Classify the type of coding task."""
     prompt_lower = prompt.lower()
     
     if any(word in prompt_lower for word in ['create', 'make', 'new']):
@@ -217,7 +245,6 @@ def _classify_task_type(prompt: str) -> str:
 
 
 def _extract_file_extension(path: str) -> str:
-    """Extract file extension from path."""
     if not path:
         return 'unknown'
     ext = path.split('.')[-1] if '.' in path else 'no_extension'
@@ -225,11 +252,15 @@ def _extract_file_extension(path: str) -> str:
 
 
 def _extract_task_keywords(text: str) -> list[str]:
-    """Extract keywords from task description."""
     import re
     words = re.findall(r'\b\w+\b', text.lower())
     stop_words = {"the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", "create", "add", "make", "write"}
     return list(set(w for w in words if len(w) > 2 and w not in stop_words))
+
+
+def _is_qwen3_model(model_name: str) -> bool:
+    """Check if model is Qwen3 (needs XML tool format)."""
+    return 'qwen3' in model_name.lower() or 'qwen-3' in model_name.lower()
 
 
 def execute(coder_prompt: str,
@@ -238,35 +269,46 @@ def execute(coder_prompt: str,
     """Drive tool-calls until the model stops requesting them."""
     s = s or load_settings()
     tools = _tool_schema()
+    
+    # Detect if using Qwen3 and format tools accordingly
+    use_qwen3_format = _is_qwen3_model(s.coder_model)
+    
+    if use_qwen3_format:
+        print(f"[DEBUG] Using Qwen3 XML tool format for model: {s.coder_model}")
+        tools_description = _format_tools_for_qwen3(tools)
+        
+        system_content = (
+            "You are the Coder. Your job is to implement requested changes by calling tools.\n\n"
+            "AVAILABLE TOOLS:\n"
+            f"{tools_description}\n\n"
+            "To call a tool, use this format:\n"
+            '<tool_call>\n'
+            '{"name": "tool_name", "arguments": {"param": "value"}}\n'
+            '</tool_call>\n\n'
+            "EXAMPLE:\n"
+            "User: Create a file hello.py with print hello world\n"
+            "Assistant: <tool_call>\n"
+            '{"name": "fs_write", "arguments": {"path": "hello.py", "content": "print(\'Hello, World!\')"}}\n'
+            "</tool_call>\n\n"
+            "RULES:\n"
+            "1. ALWAYS use tool_call tags to make changes\n"
+            "2. For file modifications: fs_read first, then fs_write\n"
+            "3. Each tool call must be valid JSON inside <tool_call> tags\n"
+            "4. Continue until task is fully complete"
+        )
+    else:
+        print(f"[DEBUG] Using standard OpenAI tool format for model: {s.coder_model}")
+        system_content = (
+            "You are the Coder. Your job is to implement requested changes by calling tools.\n\n"
+            "RULES:\n"
+            "1. ALWAYS call tools to make actual changes\n"
+            "2. For file modifications: fs_read first, then fs_write\n"
+            "3. For new files: directly use fs_write\n"
+            "4. Continue until task is fully complete"
+        )
+    
     messages: list[dict[str, str]] = [
-        {
-            "role": "system",
-            "content": (
-                "You are the Coder. Your job is to implement requested changes by calling tools.\n\n"
-                "EXAMPLE WORKFLOW:\n"
-                "User: Create a simple math.py file with add function\n"
-                "Assistant: {\"name\": \"fs_write\", \"arguments\": {\"path\": \"math.py\", \"content\": \"def add(a, b):\\n    return a + b\"}}\n"
-                "Tool result: wrote math.py (2 lines, 25 bytes)\n"
-                "Assistant: I've created math.py with an add function that takes two parameters and returns their sum.\n\n"
-                
-                "User: Add error handling to existing config.py\n"
-                "Assistant: {\"name\": \"fs_read\", \"arguments\": {\"path\": \"config.py\"}}\n"
-                "Tool result: def load_config(): return {...}\n"
-                "Assistant: {\"name\": \"fs_write\", \"arguments\": {\"path\": \"config.py\", \"content\": \"def load_config():\\n    try:\\n        return {...}\\n    except Exception as e:\\n        print(f'Error: {e}')\\n        return None\"}}\n"
-                "Tool result: wrote config.py (5 lines, 120 bytes)\n"
-                "Assistant: I've added try-catch error handling to the load_config function.\n\n"
-                
-                "RULES:\n"
-                "1. ALWAYS call tools to make actual changes - descriptions don't count\n"
-                "2. For file modifications: fs_read first, then fs_write with complete content\n"
-                "3. For new files: directly use fs_write\n"
-                "4. Each tool call must be valid JSON on its own line\n"
-                "5. After successful tool calls, briefly confirm what was done\n"
-                "6. Continue until task is fully complete\n\n"
-                
-                "Remember: You must EXECUTE changes with tools, not just analyze or describe them."
-            ),
-        },
+        {"role": "system", "content": system_content},
         {"role": "user", "content": coder_prompt},
     ]
 
@@ -281,24 +323,22 @@ def execute(coder_prompt: str,
         while steps < s.max_steps:
             steps += 1
             
-            # Build payload compatible with Ollama API
+            # Build payload - for Qwen3, don't send tools in API (already in prompt)
             payload = {
                 "model": s.coder_model,
                 "messages": messages,
-                "tools": tools,
                 "stream": True,
             }
             
-            # Only add options if they're supported (remove problematic ones)
-            # Ollama supports: temperature, top_p, top_k, repeat_penalty
-            # But NOT in an "options" wrapper for /api/chat
+            # Only add tools parameter for non-Qwen3 models
+            if not use_qwen3_format:
+                payload["tools"] = tools
             
             content_chunks = []
             tool_calls = []
             done = False
             
             try:
-                # Stream response from Ollama
                 with cli.stream("POST", url, json=payload) as resp:
                     resp.raise_for_status()
                     for line in resp.iter_lines():
@@ -314,44 +354,31 @@ def execute(coder_prompt: str,
                             content_chunks.append(chunk)
                             if reporter:
                                 reporter.on_llm_chunk(chunk)
+                        
+                        # Standard tool calls from API
                         calls = msg.get("tool_calls") or []
                         if calls:
                             tool_calls = calls
+                        
                         if data.get("done", False):
                             done = True
                             break
+                            
             except httpx.HTTPStatusError as e:
                 print(f"[ERROR] HTTP {e.response.status_code}: {e.response.text[:200]}")
-                # Try without tools if it failed
-                if tools and "tools" in str(e.response.text).lower():
-                    print("[WARN] Model doesn't support tools, retrying without them")
-                    payload.pop("tools", None)
-                    with cli.stream("POST", url, json=payload) as resp:
-                        resp.raise_for_status()
-                        for line in resp.iter_lines():
-                            if not line:
-                                continue
-                            try:
-                                data = json.loads(line)
-                            except Exception:
-                                continue
-                            msg = data.get("message", {}) or {}
-                            chunk = msg.get("content") or ""
-                            if chunk:
-                                content_chunks.append(chunk)
-                                if reporter:
-                                    reporter.on_llm_chunk(chunk)
-                            if data.get("done", False):
-                                done = True
-                                break
-                else:
-                    raise
+                raise
                     
             content = "".join(content_chunks)
             last_text = content or last_text
             calls = tool_calls
             
-            # If no proper tool_calls but content looks like a tool call, parse it
+            # For Qwen3, extract tool calls from XML tags
+            if use_qwen3_format and content:
+                qwen3_calls = _extract_qwen3_tool_calls(content)
+                if qwen3_calls:
+                    calls = qwen3_calls
+            
+            # Fallback: parse JSON tool calls from content
             if not calls and content:
                 json_content = content.strip()
                 
@@ -364,38 +391,31 @@ def execute(coder_prompt: str,
                     json_content = json_content[:-3]
                 json_content = json_content.strip()
                 
-                
-                # Extract just the JSON object - find balanced braces
-                import re
                 if json_content.startswith('{"name":'): 
-                    # Find the matching closing brace
+                    # Find balanced braces
                     brace_count = 0
-                    start_pos = 0
-                    json_obj = json_content
                     for i, char in enumerate(json_content):
                         if char == '{':
                             brace_count += 1
                         elif char == '}':
                             brace_count -= 1
                             if brace_count == 0:
-                                json_obj = json_content[start_pos:i+1]
+                                json_obj = json_content[:i+1]
+                                try:
+                                    tool_data = json.loads(json_obj)
+                                    if "name" in tool_data and "arguments" in tool_data:
+                                        calls = [{
+                                            "function": {
+                                                "name": tool_data["name"],
+                                                "arguments": tool_data["arguments"]
+                                            }
+                                        }]
+                                except json.JSONDecodeError:
+                                    pass
                                 break
-                    
-                    try:
-                        tool_data = json.loads(json_obj)
-                        if "name" in tool_data and "arguments" in tool_data:
-                            calls = [{
-                                "function": {
-                                    "name": tool_data["name"],
-                                    "arguments": tool_data["arguments"]
-                                }
-                            }]
-                    except json.JSONDecodeError:
-                        pass
             
             # Exit if no tool calls were found
             if not calls:
-                # If no tool calls but we haven't made progress, prompt to continue
                 if steps <= 2 and last_text and not any("wrote " in msg.get("content", "") for msg in messages[-3:]):
                     continue_prompt = "Continue with the implementation. You must call tools to make actual changes."
                     messages.append({"role": "user", "content": continue_prompt})
@@ -407,8 +427,6 @@ def execute(coder_prompt: str,
                 fn = (call.get("function") or {}).get("name", "")
                 raw = (call.get("function") or {}).get("arguments", "{}")
                 try:
-                    # If it's already a dict (from our JSON parsing), use it directly
-                    # Otherwise parse it as JSON string (from proper tool calls)
                     if isinstance(raw, dict):
                         args = raw
                     else:
@@ -421,7 +439,6 @@ def execute(coder_prompt: str,
                 
                 # Check for errors and auto-retry
                 if result.startswith("ERROR:") or "failed" in result.lower():
-                    # Track retry attempts per step/call combination
                     retry_key = f"step_{steps}_{fn}_{json.dumps(args, sort_keys=True)}"
                     if not hasattr(execute, '_retry_counts'):
                         execute._retry_counts = {}
@@ -429,16 +446,15 @@ def execute(coder_prompt: str,
                     retry_count = execute._retry_counts.get(retry_key, 0)
                     if retry_count < 2:
                         execute._retry_counts[retry_key] = retry_count + 1
-                        error_fix_prompt = f"The tool call failed with error: {result}\nPlease fix the issue and try again. Focus on correcting the specific error mentioned."
+                        error_fix_prompt = f"The tool call failed with error: {result}\nPlease fix the issue and try again."
                         messages.append({"role": "user", "content": error_fix_prompt})
                         error_occurred = True
-                        break  # Break out of tool loop to retry
+                        break
                 
-                # Track successful operations for RAG learning
+                # Track successful operations
                 if "wrote " in result and result.startswith("wrote "):
                     _add_success_to_rag(coder_prompt, fn, args, result)
             
-            # If error occurred, continue to next step to allow retry
             if error_occurred:
                 continue
 
