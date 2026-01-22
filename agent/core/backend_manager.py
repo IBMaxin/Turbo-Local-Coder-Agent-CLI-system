@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import atexit
 from typing import Any, Iterator, Optional
 from dataclasses import dataclass
 
@@ -20,11 +21,26 @@ class ChatResponse:
     
 
 class BaseBackend:
-    """Base class for LLM backends."""
+    """Base class for LLM backends with connection pooling."""
     
     def __init__(self, settings: Settings):
         self.settings = settings
         self.logger = logging.getLogger(self.__class__.__name__)
+        
+        # Connection pool for better performance
+        self._client = httpx.Client(
+            timeout=httpx.Timeout(settings.request_timeout_s, connect=10.0),
+            limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+            follow_redirects=True
+        )
+        
+        # Register cleanup
+        atexit.register(self._cleanup)
+    
+    def _cleanup(self):
+        """Close HTTP client on exit."""
+        if hasattr(self, '_client'):
+            self._client.close()
     
     def chat(self, messages: list[dict], model: str, tools: list[dict] = None, 
              stream: bool = True) -> Iterator[ChatResponse]:
@@ -41,70 +57,63 @@ class BaseBackend:
 
 
 class OllamaBackend(BaseBackend):
-    """Ollama backend implementation."""
+    """Ollama backend with optimized parameters."""
     
     def chat(self, messages: list[dict], model: str, tools: list[dict] = None,
              stream: bool = True) -> Iterator[ChatResponse]:
-        """Send chat to Ollama API."""
+        """Send chat to Ollama API with optimizations."""
         url = f"{self.settings.local_host}/api/chat"
         
-        # Optimized parameters for speed
+        # Highly optimized parameters for speed
         payload = {
             "model": model,
             "messages": messages,
             "stream": stream,
             "options": {
-                "num_predict": 2048,  # Max tokens to generate
-                "temperature": 0.1,    # Lower temp = faster, more deterministic
-                "top_p": 0.9,
-                "top_k": 40,
-                "repeat_penalty": 1.1,
-                "num_thread": 8,       # Use more CPU threads
-                "num_gpu": 0,          # CPU only for now
-                "stop": ["</tool_call>", "<|endoftext|>", "<|end|>"],  # Stop tokens
+                "num_predict": 2048,      # Max tokens
+                "temperature": 0.05,       # Very low = faster + deterministic
+                "top_p": 0.85,             # Nucleus sampling
+                "top_k": 20,               # Reduced for speed
+                "repeat_penalty": 1.05,    # Light penalty
+                "num_thread": 8,           # Max CPU threads
+                "num_batch": 512,          # Batch size
+                "num_ctx": 4096,           # Context window
+                "stop": ["</tool_call>", "<|end|>", "<|endoftext|>"],
             }
         }
         
-        # Only add tools if not empty
-        if tools and len(tools) > 0:
+        # Only add tools if provided
+        if tools:
             payload["tools"] = tools
         
-        self.logger.debug(f"Ollama request to {url} with model {model}, stream={stream}")
+        self.logger.debug(f"Ollama {model}: {len(messages)} messages, stream={stream}")
         
-        with httpx.Client(timeout=self.settings.request_timeout_s) as client:
+        try:
             if not stream:
-                # Non-streaming mode - get complete response
-                resp = client.post(url, json=payload)
+                # Non-streaming: single response
+                resp = self._client.post(url, json=payload)
                 resp.raise_for_status()
                 data = resp.json()
                 
                 msg = data.get("message", {}) or {}
-                content = msg.get("content") or ""
-                tool_calls = msg.get("tool_calls") or []
+                content = msg.get("content", "")
+                tool_calls = msg.get("tool_calls")
                 
-                # Validate response is complete
-                if data.get("done") is False:
-                    self.logger.warning("Response marked as incomplete (done=False)")
-                
-                # Log performance metrics
-                if "eval_count" in data and "eval_duration" in data:
-                    tokens = data['eval_count']
-                    duration_ns = data['eval_duration']
-                    tokens_per_sec = tokens / (duration_ns / 1e9) if duration_ns > 0 else 0
-                    self.logger.debug(f"Generated {tokens} tokens at {tokens_per_sec:.1f} tok/s")
+                # Log performance
+                self._log_performance(data)
                 
                 yield ChatResponse(
                     content=content,
-                    tool_calls=tool_calls if tool_calls else None,
+                    tool_calls=tool_calls,
                     done=True
                 )
             else:
-                # Streaming mode
-                with client.stream("POST", url, json=payload) as resp:
+                # Streaming: yield chunks
+                with self._client.stream("POST", url, json=payload) as resp:
                     resp.raise_for_status()
                     
-                    content_chunks = []
-                    tool_calls = []
+                    chunks = []
+                    tool_calls = None
                     
                     for line in resp.iter_lines():
                         if not line:
@@ -116,60 +125,61 @@ class OllamaBackend(BaseBackend):
                             continue
                         
                         msg = data.get("message", {}) or {}
-                        chunk = msg.get("content") or ""
+                        chunk = msg.get("content", "")
                         
                         if chunk:
-                            content_chunks.append(chunk)
+                            chunks.append(chunk)
                             yield ChatResponse(content=chunk, done=False)
                         
-                        calls = msg.get("tool_calls") or []
-                        if calls:
-                            tool_calls = calls
+                        if msg.get("tool_calls"):
+                            tool_calls = msg["tool_calls"]
                         
-                        if data.get("done", False):
-                            final_content = "".join(content_chunks)
-                            
-                            # Log performance metrics
-                            if "eval_count" in data and "eval_duration" in data:
-                                tokens = data['eval_count']
-                                duration_ns = data['eval_duration']
-                                tokens_per_sec = tokens / (duration_ns / 1e9) if duration_ns > 0 else 0
-                                self.logger.debug(f"Generated {tokens} tokens at {tokens_per_sec:.1f} tok/s")
-                            
+                        if data.get("done"):
+                            self._log_performance(data)
                             yield ChatResponse(
-                                content=final_content,
-                                tool_calls=tool_calls if tool_calls else None,
+                                content="".join(chunks),
+                                tool_calls=tool_calls,
                                 done=True
                             )
                             break
+        except httpx.HTTPError as e:
+            self.logger.error(f"Ollama request failed: {e}")
+            raise
+    
+    def _log_performance(self, data: dict):
+        """Log performance metrics if available."""
+        if "eval_count" in data and "eval_duration" in data:
+            tokens = data["eval_count"]
+            duration_ns = data["eval_duration"]
+            if duration_ns > 0:
+                tok_per_sec = tokens / (duration_ns / 1e9)
+                self.logger.info(f"⚡ {tokens} tokens @ {tok_per_sec:.1f} tok/s")
     
     def is_available(self) -> bool:
         """Check if Ollama is running."""
         try:
             url = f"{self.settings.local_host}/api/tags"
-            with httpx.Client(timeout=5) as client:
-                resp = client.get(url)
-                return resp.status_code == 200
+            resp = self._client.get(url, timeout=3)
+            return resp.status_code == 200
         except Exception as e:
-            self.logger.warning(f"Ollama not available: {e}")
+            self.logger.debug(f"Ollama unavailable: {e}")
             return False
     
     def get_models(self) -> list[str]:
         """List Ollama models."""
         try:
             url = f"{self.settings.local_host}/api/tags"
-            with httpx.Client(timeout=5) as client:
-                resp = client.get(url)
-                resp.raise_for_status()
-                data = resp.json()
-                return [m["name"] for m in data.get("models", [])]
+            resp = self._client.get(url, timeout=5)
+            resp.raise_for_status()
+            data = resp.json()
+            return [m["name"] for m in data.get("models", [])]
         except Exception as e:
-            self.logger.error(f"Failed to get Ollama models: {e}")
+            self.logger.error(f"Failed to list models: {e}")
             return []
 
 
 class LlamaCppBackend(BaseBackend):
-    """llama.cpp backend implementation."""
+    """llama.cpp backend with OpenAI-compatible API."""
     
     def __init__(self, settings: Settings):
         super().__init__(settings)
@@ -182,62 +192,61 @@ class LlamaCppBackend(BaseBackend):
         
         self.server = LlamaCppServer(self.settings)
         if not self.server.is_running():
-            self.logger.info("Starting llama.cpp server...")
+            self.logger.info("🚀 Starting llama.cpp server...")
             self.server.start()
     
     def chat(self, messages: list[dict], model: str, tools: list[dict] = None,
              stream: bool = True) -> Iterator[ChatResponse]:
-        """Send chat to llama.cpp server."""
+        """Send chat to llama.cpp OpenAI API."""
         if not self.server or not self.server.is_running():
             self._ensure_server()
         
         url = f"http://127.0.0.1:{self.settings.llamacpp_port}/v1/chat/completions"
         
+        # Optimized payload
         payload = {
             "messages": messages,
             "stream": stream,
             "max_tokens": 2048,
-            "temperature": 0.1,
-            "top_p": 0.9,
+            "temperature": 0.05,  # Low = fast + deterministic
+            "top_p": 0.85,
+            "frequency_penalty": 0.1,
+            "presence_penalty": 0.1,
         }
         
-        # Only add tools if not empty
-        if tools and len(tools) > 0:
+        if tools:
             payload["tools"] = tools
         
-        self.logger.debug(f"llama.cpp request to {url}, stream={stream}")
+        self.logger.debug(f"llama.cpp: {len(messages)} messages, stream={stream}")
         
-        with httpx.Client(timeout=self.settings.request_timeout_s) as client:
+        try:
             if not stream:
-                # Non-streaming mode
-                resp = client.post(url, json=payload)
+                # Non-streaming
+                resp = self._client.post(url, json=payload)
                 resp.raise_for_status()
                 data = resp.json()
                 
                 choices = data.get("choices", [])
                 if choices:
                     message = choices[0].get("message", {})
-                    content = message.get("content") or ""
-                    tool_calls = message.get("tool_calls") or []
-                    
                     yield ChatResponse(
-                        content=content,
-                        tool_calls=tool_calls if tool_calls else None,
+                        content=message.get("content", ""),
+                        tool_calls=message.get("tool_calls"),
                         done=True
                     )
             else:
-                # Streaming mode
-                with client.stream("POST", url, json=payload) as resp:
+                # Streaming
+                with self._client.stream("POST", url, json=payload) as resp:
                     resp.raise_for_status()
                     
-                    content_chunks = []
-                    tool_calls = []
+                    chunks = []
+                    tool_calls = None
                     
                     for line in resp.iter_lines():
                         if not line or not line.startswith("data: "):
                             continue
                         
-                        line = line[6:]  # Remove "data: " prefix
+                        line = line[6:]  # Remove "data: "
                         if line == "[DONE]":
                             break
                         
@@ -251,31 +260,32 @@ class LlamaCppBackend(BaseBackend):
                             continue
                         
                         delta = choices[0].get("delta", {})
-                        chunk = delta.get("content") or ""
+                        chunk = delta.get("content", "")
                         
                         if chunk:
-                            content_chunks.append(chunk)
+                            chunks.append(chunk)
                             yield ChatResponse(content=chunk, done=False)
                         
-                        # Check for tool calls
-                        if "tool_calls" in delta:
+                        if delta.get("tool_calls"):
                             tool_calls = delta["tool_calls"]
                         
                         if choices[0].get("finish_reason") == "stop":
-                            final_content = "".join(content_chunks)
                             yield ChatResponse(
-                                content=final_content,
-                                tool_calls=tool_calls if tool_calls else None,
+                                content="".join(chunks),
+                                tool_calls=tool_calls,
                                 done=True
                             )
                             break
+        except httpx.HTTPError as e:
+            self.logger.error(f"llama.cpp request failed: {e}")
+            raise
     
     def is_available(self) -> bool:
         """Check if llama.cpp server is running."""
         return self.server and self.server.is_running()
     
     def get_models(self) -> list[str]:
-        """List loaded model."""
+        """Get loaded model path."""
         if self.settings.llamacpp_model_path:
             return [self.settings.llamacpp_model_path]
         return []
@@ -283,12 +293,12 @@ class LlamaCppBackend(BaseBackend):
     def shutdown(self):
         """Stop llama.cpp server."""
         if self.server:
-            self.logger.info("Stopping llama.cpp server...")
             self.server.stop()
+        self._cleanup()
 
 
 def get_backend(settings: Settings) -> BaseBackend:
-    """Get the appropriate backend based on settings."""
+    """Factory function to get the appropriate backend."""
     backend_type = settings.backend.lower()
     
     if backend_type == "llamacpp":
@@ -296,4 +306,7 @@ def get_backend(settings: Settings) -> BaseBackend:
     elif backend_type == "ollama":
         return OllamaBackend(settings)
     else:
-        raise ValueError(f"Unknown backend: {backend_type}. Use 'ollama' or 'llamacpp'")
+        raise ValueError(
+            f"Unknown backend: '{backend_type}'.\n"
+            "Valid options: 'ollama' or 'llamacpp'"
+        )
