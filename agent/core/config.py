@@ -21,6 +21,16 @@ class Settings:
     request_timeout_s: int
     dry_run: bool
     
+    # Backend selection
+    backend: str = "ollama"  # "ollama" or "llamacpp"
+    
+    # llama.cpp specific settings
+    llamacpp_model_path: str = "./models/phi-4-mini-Q4_K_M.gguf"
+    llamacpp_port: int = 8080
+    llamacpp_use_vulkan: bool = True
+    llamacpp_n_gpu_layers: int = 32
+    llamacpp_context_size: int = 4096
+    
     # Validation and error tracking
     _validation_errors: list[str] = field(default_factory=list, init=False, repr=False)
     
@@ -54,6 +64,18 @@ class Settings:
         # Validate API key format (basic check)
         if self.api_key and len(self.api_key) < 10:
             self._validation_errors.append("api_key appears to be too short")
+        
+        # Validate backend
+        if self.backend.lower() not in ["ollama", "llamacpp"]:
+            self._validation_errors.append(f"backend must be 'ollama' or 'llamacpp', got: {self.backend}")
+        
+        # Validate llama.cpp settings
+        if self.llamacpp_port < 1 or self.llamacpp_port > 65535:
+            self._validation_errors.append(f"llamacpp_port must be 1-65535, got: {self.llamacpp_port}")
+        if self.llamacpp_n_gpu_layers < 0:
+            self._validation_errors.append(f"llamacpp_n_gpu_layers must be >= 0, got: {self.llamacpp_n_gpu_layers}")
+        if self.llamacpp_context_size < 512:
+            self._validation_errors.append(f"llamacpp_context_size must be >= 512, got: {self.llamacpp_context_size}")
     
     def with_overrides(self, **kwargs) -> 'Settings':
         """Create a new Settings instance with specified overrides."""
@@ -66,6 +88,12 @@ class Settings:
             'max_steps': self.max_steps,
             'request_timeout_s': self.request_timeout_s,
             'dry_run': self.dry_run,
+            'backend': self.backend,
+            'llamacpp_model_path': self.llamacpp_model_path,
+            'llamacpp_port': self.llamacpp_port,
+            'llamacpp_use_vulkan': self.llamacpp_use_vulkan,
+            'llamacpp_n_gpu_layers': self.llamacpp_n_gpu_layers,
+            'llamacpp_context_size': self.llamacpp_context_size,
         }
         current_values.update({k: v for k, v in kwargs.items() if v is not None})
         return Settings(**current_values)
@@ -81,6 +109,12 @@ class Settings:
             'max_steps': self.max_steps,
             'request_timeout_s': self.request_timeout_s,
             'dry_run': self.dry_run,
+            'backend': self.backend,
+            'llamacpp_model_path': self.llamacpp_model_path,
+            'llamacpp_port': self.llamacpp_port,
+            'llamacpp_use_vulkan': self.llamacpp_use_vulkan,
+            'llamacpp_n_gpu_layers': self.llamacpp_n_gpu_layers,
+            'llamacpp_context_size': self.llamacpp_context_size,
         }
 
 
@@ -162,6 +196,14 @@ def load_settings(config_path: Optional[Path] = None) -> Settings:
         timeout = _parse_int_with_validation(os.getenv("REQUEST_TIMEOUT_S", "120"), "REQUEST_TIMEOUT_S")
         dry_run = _parse_bool(os.getenv("DRY_RUN", "0"))
         
+        # Backend settings
+        backend = os.getenv("BACKEND", "ollama")
+        llamacpp_model_path = os.getenv("LLAMACPP_MODEL_PATH", "./models/phi-4-mini-Q4_K_M.gguf")
+        llamacpp_port = _parse_int_with_validation(os.getenv("LLAMACPP_PORT", "8080"), "LLAMACPP_PORT", 1)
+        llamacpp_use_vulkan = _parse_bool(os.getenv("LLAMACPP_USE_VULKAN", "1"))
+        llamacpp_n_gpu_layers = _parse_int_with_validation(os.getenv("LLAMACPP_N_GPU_LAYERS", "32"), "LLAMACPP_N_GPU_LAYERS", 0)
+        llamacpp_context_size = _parse_int_with_validation(os.getenv("LLAMACPP_CONTEXT_SIZE", "4096"), "LLAMACPP_CONTEXT_SIZE", 512)
+        
         settings = Settings(
             turbo_host=turbo_host,
             local_host=local_host,
@@ -171,6 +213,12 @@ def load_settings(config_path: Optional[Path] = None) -> Settings:
             max_steps=max_steps,
             request_timeout_s=timeout,
             dry_run=dry_run,
+            backend=backend,
+            llamacpp_model_path=llamacpp_model_path,
+            llamacpp_port=llamacpp_port,
+            llamacpp_use_vulkan=llamacpp_use_vulkan,
+            llamacpp_n_gpu_layers=llamacpp_n_gpu_layers,
+            llamacpp_context_size=llamacpp_context_size,
         )
         
         logging.info("Configuration loaded successfully")
