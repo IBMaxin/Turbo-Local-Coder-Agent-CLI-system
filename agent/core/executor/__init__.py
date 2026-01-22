@@ -1,25 +1,9 @@
-"""Secure modular executor system with type safety."""
-from __future__ import annotations
+"""
+Secure Executor Module
 
-from .base import ExecSummary, ExecutorProtocol
-from .dispatch import ToolDispatcher
-from .formatters import (
-    ModelToolFormatter,
-    Qwen3Formatter,
-    Phi4Formatter,
-    Granite4Formatter,
-    StandardFormatter,
-)
-from .orchestrator import execute
+Splits monolithic executor into modular components.
+"""
+from .types import ExecSummary, ExecutionResult
+from .runner import Executor
 
-__all__ = [
-    "ExecSummary",
-    "ExecutorProtocol",
-    "ToolDispatcher",
-    "ModelToolFormatter",
-    "Qwen3Formatter",
-    "Phi4Formatter",
-    "Granite4Formatter",
-    "StandardFormatter",
-    "execute",
-]
+__all__ = ["Executor", "ExecSummary", "ExecutionResult"]
