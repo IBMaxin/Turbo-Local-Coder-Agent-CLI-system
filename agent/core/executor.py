@@ -274,47 +274,79 @@ def execute(coder_prompt: str,
     steps = 0
     last_text = ""
 
+    print(f"[DEBUG] Executor calling: {url}")
+    print(f"[DEBUG] Using model: {s.coder_model}")
 
     with httpx.Client(timeout=s.request_timeout_s) as cli:
         while steps < s.max_steps:
             steps += 1
+            
+            # Build payload compatible with Ollama API
             payload = {
                 "model": s.coder_model,
                 "messages": messages,
                 "tools": tools,
                 "stream": True,
-                "options": {
-                    "temperature": 0.1,
-                    "top_p": 0.9,
-                    "repeat_penalty": 1.1,
-                    "stop": ["```\n\n", "---", "HUMAN:", "USER:"]
-                }
             }
+            
+            # Only add options if they're supported (remove problematic ones)
+            # Ollama supports: temperature, top_p, top_k, repeat_penalty
+            # But NOT in an "options" wrapper for /api/chat
+            
             content_chunks = []
             tool_calls = []
             done = False
-            # Stream response from Ollama
-            with cli.stream("POST", url, json=payload) as resp:
-                resp.raise_for_status()
-                for line in resp.iter_lines():
-                    if not line:
-                        continue
-                    try:
-                        data = json.loads(line)
-                    except Exception:
-                        continue
-                    msg = data.get("message", {}) or {}
-                    chunk = msg.get("content") or ""
-                    if chunk:
-                        content_chunks.append(chunk)
-                        if reporter:
-                            reporter.on_llm_chunk(chunk)
-                    calls = msg.get("tool_calls") or []
-                    if calls:
-                        tool_calls = calls
-                    if data.get("done", False):
-                        done = True
-                        break
+            
+            try:
+                # Stream response from Ollama
+                with cli.stream("POST", url, json=payload) as resp:
+                    resp.raise_for_status()
+                    for line in resp.iter_lines():
+                        if not line:
+                            continue
+                        try:
+                            data = json.loads(line)
+                        except Exception:
+                            continue
+                        msg = data.get("message", {}) or {}
+                        chunk = msg.get("content") or ""
+                        if chunk:
+                            content_chunks.append(chunk)
+                            if reporter:
+                                reporter.on_llm_chunk(chunk)
+                        calls = msg.get("tool_calls") or []
+                        if calls:
+                            tool_calls = calls
+                        if data.get("done", False):
+                            done = True
+                            break
+            except httpx.HTTPStatusError as e:
+                print(f"[ERROR] HTTP {e.response.status_code}: {e.response.text[:200]}")
+                # Try without tools if it failed
+                if tools and "tools" in str(e.response.text).lower():
+                    print("[WARN] Model doesn't support tools, retrying without them")
+                    payload.pop("tools", None)
+                    with cli.stream("POST", url, json=payload) as resp:
+                        resp.raise_for_status()
+                        for line in resp.iter_lines():
+                            if not line:
+                                continue
+                            try:
+                                data = json.loads(line)
+                            except Exception:
+                                continue
+                            msg = data.get("message", {}) or {}
+                            chunk = msg.get("content") or ""
+                            if chunk:
+                                content_chunks.append(chunk)
+                                if reporter:
+                                    reporter.on_llm_chunk(chunk)
+                            if data.get("done", False):
+                                done = True
+                                break
+                else:
+                    raise
+                    
             content = "".join(content_chunks)
             last_text = content or last_text
             calls = tool_calls
@@ -335,7 +367,7 @@ def execute(coder_prompt: str,
                 
                 # Extract just the JSON object - find balanced braces
                 import re
-                if json_content.startswith('{"name":'):
+                if json_content.startswith('{"name":'): 
                     # Find the matching closing brace
                     brace_count = 0
                     start_pos = 0
