@@ -48,13 +48,20 @@ class OllamaBackend(BaseBackend):
         """Send chat to Ollama API."""
         url = f"{self.settings.local_host}/api/chat"
         
+        # Optimized parameters for speed
         payload = {
             "model": model,
             "messages": messages,
             "stream": stream,
             "options": {
                 "num_predict": 2048,  # Max tokens to generate
-                "temperature": 0.7,
+                "temperature": 0.1,    # Lower temp = faster, more deterministic
+                "top_p": 0.9,
+                "top_k": 40,
+                "repeat_penalty": 1.1,
+                "num_thread": 8,       # Use more CPU threads
+                "num_gpu": 0,          # CPU only for now
+                "stop": ["</tool_call>", "<|endoftext|>", "<|end|>"],  # Stop tokens
             }
         }
         
@@ -62,7 +69,7 @@ class OllamaBackend(BaseBackend):
         if tools and len(tools) > 0:
             payload["tools"] = tools
         
-        self.logger.debug(f"Ollama request to {url} with model {model}, stream={stream}, num_predict=2048")
+        self.logger.debug(f"Ollama request to {url} with model {model}, stream={stream}")
         
         with httpx.Client(timeout=self.settings.request_timeout_s) as client:
             if not stream:
@@ -79,9 +86,12 @@ class OllamaBackend(BaseBackend):
                 if data.get("done") is False:
                     self.logger.warning("Response marked as incomplete (done=False)")
                 
-                # Log response metadata
-                if "eval_count" in data:
-                    self.logger.debug(f"Generated {data['eval_count']} tokens")
+                # Log performance metrics
+                if "eval_count" in data and "eval_duration" in data:
+                    tokens = data['eval_count']
+                    duration_ns = data['eval_duration']
+                    tokens_per_sec = tokens / (duration_ns / 1e9) if duration_ns > 0 else 0
+                    self.logger.debug(f"Generated {tokens} tokens at {tokens_per_sec:.1f} tok/s")
                 
                 yield ChatResponse(
                     content=content,
@@ -119,9 +129,12 @@ class OllamaBackend(BaseBackend):
                         if data.get("done", False):
                             final_content = "".join(content_chunks)
                             
-                            # Log generation stats
-                            if "eval_count" in data:
-                                self.logger.debug(f"Generated {data['eval_count']} tokens")
+                            # Log performance metrics
+                            if "eval_count" in data and "eval_duration" in data:
+                                tokens = data['eval_count']
+                                duration_ns = data['eval_duration']
+                                tokens_per_sec = tokens / (duration_ns / 1e9) if duration_ns > 0 else 0
+                                self.logger.debug(f"Generated {tokens} tokens at {tokens_per_sec:.1f} tok/s")
                             
                             yield ChatResponse(
                                 content=final_content,
@@ -184,6 +197,8 @@ class LlamaCppBackend(BaseBackend):
             "messages": messages,
             "stream": stream,
             "max_tokens": 2048,
+            "temperature": 0.1,
+            "top_p": 0.9,
         }
         
         # Only add tools if not empty
