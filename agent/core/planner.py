@@ -91,7 +91,7 @@ def get_plan(task: str, s: Settings | None = None, enhance: bool = True, force_l
         # For non-streaming, we should get one complete response
         # But iterate through all responses to handle both cases
         final_content = ""
-        for response in backend.chat(messages, s.planner_model, tools=[], stream=False):
+        for response in backend.chat(messages, s.planner_model, tools=None, stream=False):
             if response.content:
                 # For non-streaming, the last response with done=True has full content
                 if response.done:
