@@ -108,6 +108,17 @@ def _format_tools_for_qwen3(tools: list[dict]) -> str:
     return f"<tools>\n{tools_json}\n</tools>"
 
 
+def _format_tools_for_phi4(tools: list[dict]) -> str:
+    """Format tools in Phi-4-mini's expected format."""
+    # Phi-4 wants simpler format
+    simplified = [{"name": t["function"]["name"], 
+                   "description": t["function"]["description"],
+                   "parameters": t["function"]["parameters"]} 
+                  for t in tools]
+    tools_json = json.dumps(simplified, indent=2)
+    return f"<|tool|>\n{tools_json}\n</|tool|>"
+
+
 def _extract_qwen3_tool_calls(content: str) -> list[dict]:
     """Extract tool calls from Qwen3's XML format: <tool_call>{...}</tool_call>"""
     tool_calls = []
@@ -126,6 +137,34 @@ def _extract_qwen3_tool_calls(content: str) -> list[dict]:
                     "arguments": tool_data.get("arguments", {})
                 }
             })
+        except json.JSONDecodeError:
+            continue
+    
+    return tool_calls
+
+
+def _extract_phi4_tool_calls(content: str) -> list[dict]:
+    """Extract tool calls from Phi-4-mini format: <|tool_call|>@[ {...} ]"""
+    tool_calls = []
+    
+    # Pattern to match <|tool_call|>@[ ... ]
+    pattern = r'<\|tool_call\|>@?\s*\[\s*({.*?})\s*\]'
+    matches = re.findall(pattern, content, re.DOTALL)
+    
+    for match in matches:
+        try:
+            tool_data = json.loads(match)
+            # Phi-4 format: {"type":"function","function":{"name":"...","arguments":{...}}}
+            if "function" in tool_data:
+                tool_calls.append(tool_data)
+            else:
+                # Fallback for simpler format
+                tool_calls.append({
+                    "function": {
+                        "name": tool_data.get("name", ""),
+                        "arguments": tool_data.get("arguments", {})
+                    }
+                })
         except json.JSONDecodeError:
             continue
     
@@ -263,6 +302,11 @@ def _is_qwen3_model(model_name: str) -> bool:
     return 'qwen3' in model_name.lower() or 'qwen-3' in model_name.lower()
 
 
+def _is_phi4_model(model_name: str) -> bool:
+    """Check if model is Phi-4-mini (needs special tool format)."""
+    return 'phi4' in model_name.lower() or 'phi-4' in model_name.lower()
+
+
 def execute(coder_prompt: str,
             s: Settings | None = None,
             reporter: StreamingReporter | QuietReporter = None) -> ExecSummary:
@@ -270,8 +314,9 @@ def execute(coder_prompt: str,
     s = s or load_settings()
     tools = _tool_schema()
     
-    # Detect if using Qwen3 and format tools accordingly
+    # Detect model type and format tools accordingly
     use_qwen3_format = _is_qwen3_model(s.coder_model)
+    use_phi4_format = _is_phi4_model(s.coder_model)
     
     if use_qwen3_format:
         print(f"[DEBUG] Using Qwen3 XML tool format for model: {s.coder_model}")
@@ -285,15 +330,29 @@ def execute(coder_prompt: str,
             '<tool_call>\n'
             '{"name": "tool_name", "arguments": {"param": "value"}}\n'
             '</tool_call>\n\n'
-            "EXAMPLE:\n"
-            "User: Create a file hello.py with print hello world\n"
-            "Assistant: <tool_call>\n"
-            '{"name": "fs_write", "arguments": {"path": "hello.py", "content": "print(\'Hello, World!\')"}}\n'
-            "</tool_call>\n\n"
             "RULES:\n"
             "1. ALWAYS use tool_call tags to make changes\n"
             "2. For file modifications: fs_read first, then fs_write\n"
             "3. Each tool call must be valid JSON inside <tool_call> tags\n"
+            "4. Continue until task is fully complete"
+        )
+    elif use_phi4_format:
+        print(f"[DEBUG] Using Phi-4-mini tool format for model: {s.coder_model}")
+        tools_description = _format_tools_for_phi4(tools)
+        
+        system_content = (
+            "You are the Coder. Your job is to implement requested changes by calling tools.\n\n"
+            "AVAILABLE TOOLS:\n"
+            f"{tools_description}\n\n"
+            "To call a tool, output:\n"
+            '<|tool_call|>[ {"type": "function", "function": {"name": "tool_name", "arguments": {...}}} ]\n\n'
+            "EXAMPLE:\n"
+            "User: Create hello.py with hello world\n"
+            'Assistant: <|tool_call|>[ {"type": "function", "function": {"name": "fs_write", "arguments": {"path": "hello.py", "content": "print(\\'Hello, World!\\')"}}} ]\n\n'
+            "RULES:\n"
+            "1. ALWAYS output tool calls using <|tool_call|> tags\n"
+            "2. For file modifications: fs_read first, then fs_write\n"
+            "3. JSON must be valid and properly escaped\n"
             "4. Continue until task is fully complete"
         )
     else:
@@ -323,15 +382,15 @@ def execute(coder_prompt: str,
         while steps < s.max_steps:
             steps += 1
             
-            # Build payload - for Qwen3, don't send tools in API (already in prompt)
+            # Build payload - for Qwen3 and Phi4, don't send tools in API (already in prompt)
             payload = {
                 "model": s.coder_model,
                 "messages": messages,
                 "stream": True,
             }
             
-            # Only add tools parameter for non-Qwen3 models
-            if not use_qwen3_format:
+            # Only add tools parameter for standard OpenAI models
+            if not use_qwen3_format and not use_phi4_format:
                 payload["tools"] = tools
             
             content_chunks = []
@@ -372,11 +431,15 @@ def execute(coder_prompt: str,
             last_text = content or last_text
             calls = tool_calls
             
-            # For Qwen3, extract tool calls from XML tags
+            # Extract tool calls based on model format
             if use_qwen3_format and content:
                 qwen3_calls = _extract_qwen3_tool_calls(content)
                 if qwen3_calls:
                     calls = qwen3_calls
+            elif use_phi4_format and content:
+                phi4_calls = _extract_phi4_tool_calls(content)
+                if phi4_calls:
+                    calls = phi4_calls
             
             # Fallback: parse JSON tool calls from content
             if not calls and content:
@@ -391,7 +454,7 @@ def execute(coder_prompt: str,
                     json_content = json_content[:-3]
                 json_content = json_content.strip()
                 
-                if json_content.startswith('{"name":'): 
+                if json_content.startswith('{"name":'):
                     # Find balanced braces
                     brace_count = 0
                     for i, char in enumerate(json_content):
