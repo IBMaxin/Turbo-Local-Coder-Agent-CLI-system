@@ -153,6 +153,7 @@ class CoderAgent(Agent):
         total_classes = 0
 
         for content in files.values():
+            content = content.rstrip('\n')
             lines = content.split('\n')
             total_lines += len(lines)
             total_functions += content.count('def ')
@@ -440,11 +441,11 @@ class TesterAgent(Agent):
         total_classes = sum(content.count('class ') for content in code_files.values())
         total_testable = total_functions + total_classes
 
-        if total_testable == 0:
-            return {"coverage": 100, "reason": "No testable units found"}
-
         if not tests:
             return {"coverage": 0, "reason": "No tests available"}
+
+        if total_testable == 0:
+            return {"coverage": 100, "reason": "No testable units found"}
 
         # Rough estimate based on number of tests vs testable units
         estimated_coverage = min(100, (len(tests) / total_testable) * 100)

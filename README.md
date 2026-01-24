@@ -149,22 +149,25 @@ python3 -m agent.core.orchestrator "Analyze the current project structure and cr
 ### Project Structure
 
 ```
-turbo_local_coder_agent/
-├── agent/
-│   ├── __init__.py
-│   ├── core/
+Turbo-Local-Coder-Agent-CLI-system/
+├── agent/                     # Main agent system
+│   ├── core/                  # Core components
 │   │   ├── config.py          # Configuration management
 │   │   ├── orchestrator.py    # Main CLI interface
 │   │   ├── planner.py         # Remote planning logic
-│   │   └── executor.py        # Local execution engine
-│   └── tools/
-│       ├── fs.py              # File system operations
-│       ├── python_exec.py     # Python execution
-│       └── shell.py           # Shell command execution
-├── .env                       # Environment configuration
-├── CLAUDE.md                  # Claude Code guidance
+│   │   ├── executor/          # Modular execution engine
+│   │   └── ...                # Additional core modules
+│   ├── team/                  # Multi-agent system with RAG
+│   └── tools/                 # Tool implementations
+├── docs/                      # Comprehensive documentation
+├── tests/                     # Test suite
+├── scripts/                   # Utility scripts
+├── pyproject.toml             # Python project configuration
+├── requirements.txt           # Dependencies
 └── README.md                  # This file
 ```
+
+For the complete detailed structure, see [docs/PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md).
 
 ### Running Tests
 

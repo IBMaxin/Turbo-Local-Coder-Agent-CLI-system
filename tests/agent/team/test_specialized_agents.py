@@ -494,7 +494,17 @@ class TestTesterAgent:
 
         result = agent._estimate_coverage(code_files, [])
 
-        assert result["coverage"] == 100  # Special case
+        assert result["coverage"] == 0  # No tests available
+        assert "No tests available" in result["reason"]
+
+    def test_estimate_coverage_with_tests_no_testable_units(self, agent):
+        """Test coverage estimation with tests but no testable units."""
+        code_files = {"test.py": "print('hello')"}  # No functions or classes
+        tests = ["test_something"]
+
+        result = agent._estimate_coverage(code_files, tests)
+
+        assert result["coverage"] == 100  # No testable units found
         assert "No testable units found" in result["reason"]
 
     def test_generate_test_recommendations_all_good(self, agent):

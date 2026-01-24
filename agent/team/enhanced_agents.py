@@ -267,6 +267,7 @@ class RAGCoderAgent(RAGEnhancedAgent, Agent):
         total_classes = 0
 
         for content in files.values():
+            content = content.rstrip('\n')
             lines = content.split('\n')
             total_lines += len(lines)
             total_functions += content.count('def ')
