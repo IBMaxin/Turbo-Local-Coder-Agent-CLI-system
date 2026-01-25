@@ -15,8 +15,9 @@ def _safe_path(path: str) -> Path:
     base = Path.cwd().resolve()
     p = Path(path)
     if p.is_absolute():
-        p = p.relative_to("/")
-    full = (base / p).resolve()
+        full = p.resolve()
+    else:
+        full = (base / p).resolve()
     if base not in full.parents and full != base:
         raise ValueError("path escapes sandbox")
     return full

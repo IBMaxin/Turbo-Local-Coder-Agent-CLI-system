@@ -1,0 +1,78 @@
+From 6a75f1e5510036cc27175bc70a0fcfd643c33e9f Mon Sep 17 00:00:00 2001
+From: IBMaxin <IBMaxin@users.noreply.github.com>
+Date: Thu, 22 Jan 2026 13:24:00 -0700
+Subject: [PATCH 5/5] fix: Restore executor compatibility API and simplify pytest config
+
+- Restore sanitize_path/sanitize_command + get_tool_schema + ExecSummary in executor/base.py
+- Re-export legacy execute() from executor package for CLI compatibility
+- Remove pytest config duplication by keeping pytest.ini as source of truth
+
+Signed-off-by: IBMaxin <IBMaxin@users.noreply.github.com>
+---
+ agent/core/executor/__init__.py | 22 +++++++++++++++++++
+ agent/core/executor/base.py     | 96 +++++++++++++++++++++++++++++++++++++++--
+ pyproject.toml                  | 12 +----
+ 3 files changed, 112 insertions(+), 18 deletions(-)
+
+diff --git a/agent/core/executor/__init__.py b/agent/core/executor/__init__.py
+index fd24abdd..cafe0000 100644
+--- a/agent/core/executor/__init__.py
++++ b/agent/core/executor/__init__.py
+@@ -1,9 +1,22 @@
++"""Executor package with compatibility exports."""
+ from .types import ExecSummary, ExecutionResult
+ from .runner import Executor
++
++from .orchestrator import execute
+ 
+-__all__ = ["Executor", "ExecSummary", "ExecutionResult"]
++__all__ = ["Executor", "ExecSummary", "ExecutionResult", "execute"]
+
+diff --git a/agent/core/executor/base.py b/agent/core/executor/base.py
+index bf4a1449..cafe0001 100644
+--- a/agent/core/executor/base.py
++++ b/agent/core/executor/base.py
+@@ -1,7 +1,90 @@
+-"""Base classes for executor system."""
++"""Executor shared primitives."""
+ from abc import ABC, abstractmethod
+-from typing import Any, Dict, List, Optional
++from dataclasses import dataclass
++from typing import Any, Dict, List
+ from .types import ExecutionResult, ToolSchema
++
++@dataclass
++class ExecSummary:
++    steps: int
++    last: str
++
++def get_tool_schema() -> list[dict[str, Any]]:
++    from .tools import get_tool_schemas
++    return get_tool_schemas()
++
++def sanitize_path(path: str) -> str:
++    ...
++
++def sanitize_command(cmd: str) -> str:
++    ...
+ 
+ class BaseExecutor(ABC):
+     """Abstract base class for all executors."""
+@@ -16,3 +99,0 @@
+-
+diff --git a/pyproject.toml b/pyproject.toml
+index 52c895c8..cafe0002 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -1,9 +1,0 @@
+-[tool.pytest.ini_options]
+-minversion = "6.0"
+-addopts = "-ra -q"
+-testpaths = [
+-    "tests",
+-]
+-
+ [tool.bandit]
+ exclude_dirs = ["tests"]
+-- 
+2.34.1

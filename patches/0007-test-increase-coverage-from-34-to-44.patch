@@ -1,0 +1,915 @@
+diff --git a/.env.ollama-backup b/.env.ollama-backup
+new file mode 100644
+index 0000000..d2b0dab
+--- /dev/null
++++ b/.env.ollama-backup
+@@ -0,0 +1,25 @@
++# Turbo Local Coder Agent Configuration
++
++# LLM Endpoints
++TURBO_HOST=https://ollama.com
++OLLAMA_LOCAL=http://127.0.0.1:11434
++
++# Model Configuration
++PLANNER_MODEL=phi4-mini:latest
++CODER_MODEL=phi4-mini:latest
++# API Keys
++OLLAMA_API_KEY=360828b7671f43d5b9c2175fb6b1f147.AY3vtsM6y9gC3rNXBnQ7Jmo3        # ⚠️ ADD YOUR KEY
++
++# Execution Settings
++MAX_STEPS=25
++REQUEST_TIMEOUT_S=320
++DRY_RUN=0                                   # Safe default
++
++# Security Settings
++ALLOWED_FILE_EXTENSIONS=.py,.js,.ts,.md,.txt,.json,.yml,.yaml
++BLOCKED_DIRECTORIES=/etc,/usr,/var,/boot
++MAX_FILE_SIZE_MB=10
++
++# Optional: Monitoring
++LOG_LEVEL=DEBUG
++METRICS_ENABLED=0
+diff --git a/agent/core/executor/base.py b/agent/core/executor/base.py
+index 130deac..138eb11 100644
+--- a/agent/core/executor/base.py
++++ b/agent/core/executor/base.py
+@@ -48,7 +48,7 @@ class ToolSchema(TypedDict):
+ # Compatibility types expected by legacy executor modules
+ # ---------------------------------------------------------------------------
+ 
+-@dataclass
++@dataclass(frozen=True)
+ class ExecSummary:
+     """Summary returned by the tool-loop executor."""
+ 
+@@ -81,9 +81,14 @@ def sanitize_path(path: str) -> str:
+     p = path.strip().replace("\x00", "")
+ 
+     if p.startswith(("/", "\\")):
+-        raise ValueError("Absolute paths are not allowed")
+-    if ".." in p.split("/"):
+-        raise ValueError("Path traversal is not allowed")
++        raise ValueError("Invalid path")
++    if ".." in p.split("/") or ".." in p.split("\\"):
++        raise ValueError("Invalid path")
++    
++    # Check for invalid characters
++    invalid_chars = [";", "|", "&", "$", "`", "<", ">"]
++    if any(char in p for char in invalid_chars):
++        raise ValueError("invalid characters")
+ 
+     return p
+ 
+@@ -101,7 +106,12 @@ def sanitize_command(cmd: str) -> str:
+ 
+     banned = [";", "&&", "||", "|", "`", "$(", ">", "<"]
+     if any(tok in c for tok in banned):
+-        raise ValueError("Command contains disallowed shell operators")
++        raise ValueError("dangerous pattern")
++    
++    # Check for dangerous commands
++    dangerous_cmds = ["rm -rf", "eval ", "exec "]
++    if any(cmd in c.lower() for cmd in dangerous_cmds):
++        raise ValueError("dangerous pattern")
+ 
+     return c
+ 
+diff --git a/agent/core/executor/formatters.py b/agent/core/executor/formatters.py
+index 625a195..f3b5fa9 100644
+--- a/agent/core/executor/formatters.py
++++ b/agent/core/executor/formatters.py
+@@ -168,16 +168,20 @@ class Granite4Formatter(ModelToolFormatter):
+     def extract_calls(self, content: str) -> list[ToolCall]:
+         """Extract tool calls from Granite4's bracket notation."""
+         tool_calls: list[ToolCall] = []
+-        pattern = r"\[(\w+)\((.*?)\)\]"
++        pattern = r'\[(\w+)\((.*?)\)\]'
+         matches = re.findall(pattern, content)
+ 
+         for func_name, args_str in matches:
+             try:
+                 arguments: dict[str, Any] = {}
+                 if args_str.strip():
+-                    arg_pattern = r'(\w+)\s*=\s*(["\'](.*?)\2|[^,]+)'
+-                    arg_matches = re.findall(arg_pattern, args_str)
+-                    for param, _, value in arg_matches:
++                    # Handle quoted parameters correctly
++                    arg_pattern = r'(\w+)\s*=\s*(?:"([^"\\]*(?:\\.[^"\\]*)*)"|\'([^\'\\]*(?:\\.[^\'\\]*)*)\'|([^\s,]+))'
++                    arg_matches = re.findall(arg_pattern, args_str.strip())
++                    for param, quoted_value1, quoted_value2, unquoted_value in arg_matches:
++                        value = quoted_value1 or quoted_value2 or unquoted_value
++                        # Strip any remaining quotes
++                        value = value.strip('\'"')
+                         arguments[param] = value
+ 
+                 tool_calls.append({
+@@ -186,7 +190,7 @@ class Granite4Formatter(ModelToolFormatter):
+                         "arguments": arguments,
+                     }
+                 })
+-            except Exception:
++            except Exception as e:
+                 continue
+ 
+         return tool_calls
+diff --git a/agent/core/executor/orchestrator.py b/agent/core/executor/orchestrator.py
+index a5a9ec0..658a4d9 100644
+--- a/agent/core/executor/orchestrator.py
++++ b/agent/core/executor/orchestrator.py
+@@ -95,14 +95,14 @@ def execute(
+         
+         content = "".join(content_chunks)
+         last_text = content or last_text
+-        
++
+         # Extract tool calls from content or use API-provided
+         calls = tool_calls_from_api if tool_calls_from_api else formatter.extract_calls(content)
+-        
++
+         # Exit if no tool calls
+         if not calls:
+             # Try to encourage tool usage on early steps
+-            if steps <= 2 and last_text and not _has_tool_results(messages):
++            if steps <= 2 and not content_chunks and not _has_tool_results(messages):
+                 messages.append({
+                     "role": "user",
+                     "content": "Continue with the implementation. You must call tools to make actual changes.",
+diff --git a/code_file.txt b/code_file.txt
+new file mode 100644
+index 0000000..5dd01c1
+--- /dev/null
++++ b/code_file.txt
+@@ -0,0 +1 @@
++Hello, world!
+\ No newline at end of file
+diff --git a/fibonacci_iterative.py b/fibonacci_iterative.py
+new file mode 100644
+index 0000000..0e2b219
+--- /dev/null
++++ b/fibonacci_iterative.py
+@@ -0,0 +1 @@
++def fibonacci_iterative(n: int) -> int:\n    \n    def _fib(n: int) -> int:\n        if n < 0:\n            raise ValueError("Input must be a non-negative integer.")\n        if n == 0:\n            return 0\n        a, b = 0, 1\n        for _ in range(n - 1):\n            a, b = b, a + b\n        return a\n    return _fib(n)
+\ No newline at end of file
+diff --git a/fibonacci_recursive.py b/fibonacci_recursive.py
+new file mode 100644
+index 0000000..f687dac
+--- /dev/null
++++ b/fibonacci_recursive.py
+@@ -0,0 +1 @@
++def fibonacci_recursive(n: int) -> int:\n    \n    def _fib(n: int) -> int:\n        if n < 0:\n            raise ValueError("Input must be a non-negative integer.")\n        if n == 0:\n            return 0\n        if n == 1:\n            return 1\n        return _fib(n - 1) + _fib(n - 2)\n    return _fib(n)
+\ No newline at end of file
+diff --git a/requirements.txt b/requirements.txt
+index c46010b..767cd67 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -8,9 +8,12 @@ numpy>=1.24.0
+ scikit-learn>=1.3.0
+ 
+ # Database
+-sqlite3  # Built-in Python
++# sqlite3  # Built-in Python
+ 
+ # Optional: for enhanced features
+ # fastapi>=0.100.0  # For web interface
+ # uvicorn>=0.20.0   # For serving web interface
+-# websockets>=11.0  # For real-time updates
+\ No newline at end of file
++# websockets>=11.0  # For real-time updates
++
++# RAG system dependencies
++sentence-transformers>=2.2.0
+\ No newline at end of file
+diff --git a/tests/agent/team/test_core.py b/tests/agent/team/test_core.py
+new file mode 100644
+index 0000000..b88f76d
+--- /dev/null
++++ b/tests/agent/team/test_core.py
+@@ -0,0 +1,177 @@
++"""
++Tests for agent/team/core.py
++"""
++import pytest
++from unittest.mock import Mock
++from agent.team.core import (
++    TaskStatus, Message, Task, AgentResult, Agent, TeamOrchestrator
++)
++
++
++class TestTaskStatus:
++    """Tests for TaskStatus enum."""
++
++    def test_task_status_values(self):
++        """Test that TaskStatus has the expected values."""
++        assert TaskStatus.PENDING.value == "pending"
++        assert TaskStatus.IN_PROGRESS.value == "in_progress"
++        assert TaskStatus.COMPLETED.value == "completed"
++        assert TaskStatus.FAILED.value == "failed"
++
++
++class TestMessage:
++    """Tests for Message dataclass."""
++
++    def test_message_creation(self):
++        """Test creating a Message instance."""
++        message = Message(
++            sender="agent1",
++            recipient="agent2",
++            content="Hello",
++            message_type="test",
++            correlation_id="123"
++        )
++
++        assert message.sender == "agent1"
++        assert message.recipient == "agent2"
++        assert message.content == "Hello"
++        assert message.message_type == "test"
++        assert message.correlation_id == "123"
++
++
++class TestTask:
++    """Tests for Task dataclass."""
++
++    def test_task_creation(self):
++        """Test creating a Task instance."""
++        task = Task(
++            description="Test task",
++            requirements={"key": "value"},
++            status=TaskStatus.IN_PROGRESS,
++            assignee="agent1"
++        )
++
++        assert task.description == "Test task"
++        assert task.requirements == {"key": "value"}
++        assert task.status == TaskStatus.IN_PROGRESS
++        assert task.assignee == "agent1"
++
++
++class TestAgentResult:
++    """Tests for AgentResult dataclass."""
++
++    def test_agent_result_creation(self):
++        """Test creating an AgentResult instance."""
++        result = AgentResult(
++            agent_name="agent1",
++            task_id="task123",
++            success=True,
++            output="result",
++            error="some error",
++            processing_time=1.5
++        )
++
++        assert result.agent_name == "agent1"
++        assert result.task_id == "task123"
++        assert result.success is True
++        assert result.output == "result"
++
++
++class MockAgent(Agent):
++    """Mock concrete agent for testing."""
++    def process_task(self, task):
++        return AgentResult(self.name, task.id, True, "mock result")
++
++
++class TestAgent:
++    """Tests for Agent abstract base class."""
++
++    def test_agent_creation(self):
++        """Test creating an Agent instance."""
++        agent = MockAgent("test_agent", "tester")
++
++        assert agent.name == "test_agent"
++        assert agent.role == "tester"
++        assert agent.inbox == []
++        assert agent.is_busy is False
++
++    def test_receive_message(self):
++        """Test receiving messages."""
++        agent = MockAgent("test_agent", "tester")
++
++        message1 = Message(sender="other", recipient="test_agent", content="msg1")
++        message2 = Message(sender="other", recipient="all", content="msg2")
++
++        agent.receive_message(message1)
++        agent.receive_message(message2)
++
++        assert len(agent.inbox) == 2
++
++    def test_send_message(self):
++        """Test sending messages."""
++        agent = MockAgent("test_agent", "tester")
++
++        message = agent.send_message("recipient", "content", "type", "corr_id")
++
++        assert message.sender == "test_agent"
++        assert message.recipient == "recipient"
++        assert message.content == "content"
++
++
++class TestTeamOrchestrator:
++    """Tests for TeamOrchestrator class."""
++
++    def test_orchestrator_creation(self):
++        """Test creating a TeamOrchestrator instance."""
++        orchestrator = TeamOrchestrator()
++
++        assert orchestrator.agents == {}
++        assert orchestrator.message_queue == []
++        assert orchestrator.tasks == {}
++        assert orchestrator.task_results == {}
++
++    def test_register_agent(self):
++        """Test registering agents."""
++        orchestrator = TeamOrchestrator()
++        agent = MockAgent("agent1", "role1")
++
++        orchestrator.register_agent(agent)
++
++        assert "agent1" in orchestrator.agents
++        assert orchestrator.agents["agent1"] == agent
++
++    def test_get_agent(self):
++        """Test getting agents by name."""
++        orchestrator = TeamOrchestrator()
++        agent = MockAgent("agent1", "role1")
++        orchestrator.register_agent(agent)
++
++        assert orchestrator.get_agent("agent1") == agent
++        assert orchestrator.get_agent("nonexistent") is None
++
++    def test_submit_task(self):
++        """Test submitting tasks."""
++        orchestrator = TeamOrchestrator()
++        task = Task(description="test task")
++
++        task_id = orchestrator.submit_task(task)
++
++        assert task_id == task.id
++        assert task_id in orchestrator.tasks
++        assert task_id in orchestrator.task_results
++
++    def test_assign_task_success(self):
++        """Test successful task assignment."""
++        orchestrator = TeamOrchestrator()
++        agent = MockAgent("agent1", "role1")
++        orchestrator.register_agent(agent)
++
++        task = Task(description="test task")
++        task_id = orchestrator.submit_task(task)
++
++        result = orchestrator.assign_task(task_id, "agent1")
++
++        assert result is True
++        assert task.assignee == "agent1"
++        assert task.status == TaskStatus.COMPLETED
++        assert task.result == "mock result"
+\ No newline at end of file
+diff --git a/tests/agent/team/test_enhanced_agents.py b/tests/agent/team/test_enhanced_agents.py
+new file mode 100644
+index 0000000..175400f
+--- /dev/null
++++ b/tests/agent/team/test_enhanced_agents.py
+@@ -0,0 +1,87 @@
++"""
++Tests for Enhanced Agents
++"""
++import pytest
++import os
++import tempfile
++from agent.team.rag_system import RAGEnhancedAgent, RAGKnowledgeBase
++
++
++class TestRAGEnhancedAgent:
++    """Tests for RAGEnhancedAgent class."""
++    
++    def test_initialization(self):
++        """Test that RAGEnhancedAgent initializes correctly."""
++        agent = RAGEnhancedAgent("Test Agent", "Test Role")
++        assert agent is not None
++        assert agent.name == "Test Agent"
++        assert agent.role == "Test Role"
++        assert isinstance(agent.rag_kb, RAGKnowledgeBase)
++    
++    def test_enhance_prompt(self):
++        """Test that prompts are enhanced with relevant knowledge."""
++        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
++            db_path = f.name
++        
++        try:
++            agent = RAGEnhancedAgent("Test Agent", "Test Role", RAGKnowledgeBase(db_path))
++            
++            # Test enhancement for a testing query
++            original_prompt = "How do I write unit tests in Python?"
++            enhanced_prompt = agent.enhance_prompt(original_prompt)
++            
++            assert original_prompt in enhanced_prompt
++            assert "=== RELEVANT KNOWLEDGE ===" in enhanced_prompt
++            assert "=== END KNOWLEDGE ===" in enhanced_prompt
++            
++            # Check that relevant knowledge is included
++            assert any(keyword in enhanced_prompt.lower() for keyword in ["test", "testing", "unittest", "pytest"])
++            
++        finally:
++            os.unlink(db_path)
++    
++    def test_add_experience(self):
++        """Test that experience can be added."""
++        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
++            db_path = f.name
++        
++        try:
++            agent = RAGEnhancedAgent("Test Agent", "Test Role", RAGKnowledgeBase(db_path))
++            
++            # Add some experience
++            query = "How to read a file in Python?"
++            successful_result = "To read a file in Python, use: with open('file.txt', 'r') as f: content = f.read()"
++            
++            agent.add_experience(query, successful_result)
++            
++            # Verify the experience was added
++            results = agent.rag_kb.retrieve_relevant("How to read a file in Python?")
++            assert len(results) > 0
++            
++        finally:
++            os.unlink(db_path)
++    
++    def test_prompt_enhancement_with_different_query_types(self):
++        """Test that different query types get appropriate context."""
++        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
++            db_path = f.name
++        
++        try:
++            agent = RAGEnhancedAgent("Test Agent", "Test Role", RAGKnowledgeBase(db_path))
++            
++            # Test for best practices query
++            prompt1 = "What are Python best practices?"
++            enhanced1 = agent.enhance_prompt(prompt1)
++            assert "best practices" in enhanced1.lower()
++            
++            # Test for pattern/design query
++            prompt2 = "Show me some Python design patterns"
++            enhanced2 = agent.enhance_prompt(prompt2)
++            assert any(pattern in enhanced2.lower() for pattern in ["singleton", "factory", "decorator"])
++            
++        finally:
++            os.unlink(db_path)
++
++
++if __name__ == "__main__":
++    pytest.main([__file__, "-v"])
+diff --git a/tests/agent/team/test_rag_system.py b/tests/agent/team/test_rag_system.py
+new file mode 100644
+index 0000000..5c75357
+--- /dev/null
++++ b/tests/agent/team/test_rag_system.py
+@@ -0,0 +1,104 @@
++"""
++Tests for RAG System
++"""
++import pytest
++import os
++import tempfile
++import sqlite3
++from agent.team.rag_system import RAGKnowledgeBase, KnowledgeChunk
++
++
++class TestRAGKnowledgeBase:
++    """Tests for RAGKnowledgeBase class."""
++    
++    def test_initialization(self):
++        """Test that RAGKnowledgeBase initializes correctly."""
++        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
++            db_path = f.name
++        
++        try:
++            rag_kb = RAGKnowledgeBase(db_path)
++            assert rag_kb is not None
++            
++            # Check that built-in knowledge was loaded
++            with sqlite3.connect(db_path) as conn:
++                cursor = conn.execute("SELECT COUNT(*) FROM knowledge_chunks")
++                count = cursor.fetchone()[0]
++                assert count > 0
++                
++        finally:
++            os.unlink(db_path)
++    
++    def test_retrieve_relevant(self):
++        """Test that relevant knowledge is retrieved for a query."""
++        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
++            db_path = f.name
++        
++        try:
++            rag_kb = RAGKnowledgeBase(db_path)
++            
++            # Test retrieval for Python best practices
++            results = rag_kb.retrieve_relevant("Python best practices")
++            assert len(results) > 0
++            assert any("best practices" in chunk.content.lower() for chunk, score in results)
++            
++            # Test retrieval for testing
++            results = rag_kb.retrieve_relevant("How to write unit tests in Python")
++            assert len(results) > 0
++            assert any("testing" in chunk.content.lower() for chunk, score in results)
++            
++            # Test retrieval for algorithms
++            results = rag_kb.retrieve_relevant("Implement fibonacci function")
++            assert len(results) > 0
++            assert any("fibonacci" in chunk.content.lower() for chunk, score in results)
++            
++        finally:
++            os.unlink(db_path)
++    
++    def test_add_knowledge(self):
++        """Test that adding knowledge works."""
++        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
++            db_path = f.name
++        
++        try:
++            rag_kb = RAGKnowledgeBase(db_path)
++            
++            # Add new knowledge
++            new_chunk = KnowledgeChunk(
++                id="test-chunk",
++                content="This is a test knowledge chunk about Python dictionaries.",
++                source="test",
++                chunk_type="code",
++                keywords=["python", "dictionary", "test"]
++            )
++            
++            rag_kb.add_knowledge(new_chunk)
++            
++            # Verify it was added
++            results = rag_kb.retrieve_relevant("Python dictionary")
++            assert len(results) > 0
++            assert any("test knowledge chunk" in chunk.content for chunk, score in results)
++            
++        finally:
++            os.unlink(db_path)
++    
++    def test_get_context_for_query(self):
++        """Test that context is provided for queries."""
++        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
++            db_path = f.name
++        
++        try:
++            rag_kb = RAGKnowledgeBase(db_path)
++            
++            # Test getting context for testing query
++            context = rag_kb.get_context_for_query("How do I test Python code?")
++            assert "=== RELEVANT KNOWLEDGE ===" in context
++            assert "=== END KNOWLEDGE ===" in context
++            assert len(context) > 100
++            
++        finally:
++            os.unlink(db_path)
++
++
++if __name__ == "__main__":
++    pytest.main([__file__, "-v"])
+diff --git a/tests/agent/team/test_workflow.py b/tests/agent/team/test_workflow.py
+new file mode 100644
+index 0000000..8ae2207
+--- /dev/null
++++ b/tests/agent/team/test_workflow.py
+@@ -0,0 +1,141 @@
++"""
++Tests for agent/team/workflow.py
++"""
++import pytest
++from unittest.mock import Mock, patch
++from agent.team.workflow import CodingWorkflow, WorkflowResult
++
++
++class TestWorkflowResult:
++    """Tests for WorkflowResult dataclass."""
++
++    def test_workflow_result_creation(self):
++        """Test creating a WorkflowResult instance."""
++        result = WorkflowResult(
++            success=True,
++            task_id="task123",
++            plan={"steps": ["step1"]},
++            code={"files": ["file1.py"]},
++            review={"comments": []},
++            tests={"coverage": 85.0},
++            pr_url="https://github.com/user/repo/pull/1",
++            total_time=120.5,
++            errors=["error1", "error2"]
++        )
++
++        assert result.success is True
++        assert result.task_id == "task123"
++        assert result.plan == {"steps": ["step1"]}
++        assert result.code == {"files": ["file1.py"]}
++        assert result.review == {"comments": []}
++        assert result.tests == {"coverage": 85.0}
++        assert result.pr_url == "https://github.com/user/repo/pull/1"
++        assert result.total_time == 120.5
++        assert result.errors == ["error1", "error2"]
++
++    def test_workflow_result_defaults(self):
++        """Test WorkflowResult default values."""
++        result = WorkflowResult(success=False, task_id="task123")
++
++        assert result.success is False
++        assert result.task_id == "task123"
++        assert result.plan is None
++        assert result.code is None
++        assert result.review is None
++        assert result.tests is None
++        assert result.pr_url is None
++        assert result.total_time == 0.0
++        assert result.errors == []
++
++
++class TestCodingWorkflow:
++    """Tests for CodingWorkflow class."""
++
++    @patch('agent.team.workflow.PlannerAgent')
++    @patch('agent.team.workflow.CoderAgent')
++    @patch('agent.team.workflow.ReviewerAgent')
++    @patch('agent.team.workflow.TesterAgent')
++    def test_initialization(self, mock_tester, mock_reviewer, mock_coder, mock_planner):
++        """Test workflow initialization."""
++        # Setup mocks
++        mock_planner.return_value = Mock()
++        mock_coder.return_value = Mock()
++        mock_reviewer.return_value = Mock()
++        mock_tester.return_value = Mock()
++
++        workflow = CodingWorkflow(min_coverage=80.0)
++
++        assert workflow.min_coverage == 80.0
++        assert hasattr(workflow, 'orchestrator')
++        assert hasattr(workflow, 'planner')
++        assert hasattr(workflow, 'coder')
++        assert hasattr(workflow, 'reviewer')
++        assert hasattr(workflow, 'tester')
++
++        # Check that agents were registered
++        assert mock_planner.called
++        assert mock_coder.called
++        assert mock_reviewer.called
++        assert mock_tester.called
++
++    @patch('agent.team.workflow.PlannerAgent')
++    @patch('agent.team.workflow.CoderAgent')
++    @patch('agent.team.workflow.ReviewerAgent')
++    @patch('agent.team.workflow.TesterAgent')
++    @patch('agent.team.workflow.time')
++    def test_execute_full_workflow_planning_failure(self, mock_time, mock_tester, mock_reviewer, mock_coder, mock_planner):
++        """Test workflow execution when planning fails."""
++        # Setup mocks
++        mock_time.time.return_value = 100.0
++
++        mock_planner_instance = Mock()
++        mock_planner.return_value = mock_planner_instance
++        mock_coder.return_value = Mock()
++        mock_reviewer.return_value = Mock()
++        mock_tester.return_value = Mock()
++
++        workflow = CodingWorkflow(min_coverage=0.0)
++
++        # Mock planning failure
++        workflow._execute_planning_phase = Mock(return_value=None)
++
++        result = workflow.execute_full_workflow("test description")
++
++        assert result.success is False
++        assert "Planning phase failed" in result.errors
++        assert result.total_time == 0.0  # Not set due to early return
++
++    @patch('agent.team.workflow.PlannerAgent')
++    @patch('agent.team.workflow.CoderAgent')
++    @patch('agent.team.workflow.ReviewerAgent')
++    @patch('agent.team.workflow.TesterAgent')
++    @patch('agent.team.workflow.time')
++    def test_execute_full_workflow_success(self, mock_time, mock_tester, mock_reviewer, mock_coder, mock_planner):
++        """Test successful workflow execution."""
++        # Setup mocks
++        mock_time.time.return_value = 100.0
++
++        mock_planner_instance = Mock()
++        mock_planner.return_value = mock_planner_instance
++        mock_coder.return_value = Mock()
++        mock_reviewer.return_value = Mock()
++        mock_tester.return_value = Mock()
++
++        workflow = CodingWorkflow()
++
++        # Mock successful phases
++        plan_result = {"task_id": "task123", "steps": ["step1"]}
++        workflow._execute_planning_phase = Mock(return_value=plan_result)
++        workflow._execute_coding_phase = Mock(return_value={"files": ["file1.py"]})
++        workflow._execute_linting_phase = Mock(return_value={"success": True, "output": ""})
++        workflow._execute_testing_phase = Mock(return_value={"coverage_estimate": {"coverage": 85.0}, "overall_success": True})
++        workflow._execute_review_phase = Mock(return_value={"comments": []})
++
++        result = workflow.execute_full_workflow("test description", skip_review=False, skip_testing=False)
++
++        assert result.success is True
++        assert result.task_id == "task123"
++        assert result.plan == plan_result
++        assert result.code == {"files": ["file1.py"]}
++        assert result.tests == {"coverage_estimate": {"coverage": 85.0}, "overall_success": True}
++        assert result.review == {"comments": []}
+\ No newline at end of file
+diff --git a/tests/agent/test_main.py b/tests/agent/test_main.py
+new file mode 100644
+index 0000000..7f6b8ea
+--- /dev/null
++++ b/tests/agent/test_main.py
+@@ -0,0 +1,192 @@
++"""
++Tests for agent/main.py
++"""
++import pytest
++from unittest.mock import Mock, patch, MagicMock
++from agent.main import execute_standard_workflow, execute_enhanced_workflow
++from agent.core.config import Settings
++
++
++class TestExecuteStandardWorkflow:
++    """Tests for execute_standard_workflow function."""
++
++    @patch('agent.main.get_plan')
++    @patch('agent.main.execute')
++    @patch('agent.core.config.Settings._validate_settings')
++    def test_execute_standard_workflow_success(self, mock_validate, mock_execute, mock_get_plan):
++        """Test successful execution of standard workflow."""
++        # Setup mocks
++        mock_validate.return_value = None  # Skip validation
++        mock_reporter = Mock()
++
++        mock_plan = Mock()
++        mock_plan.plan = ["step1", "step2"]
++        mock_plan.coder_prompt = "test prompt"
++        mock_get_plan.return_value = mock_plan
++
++        mock_result = Mock()
++        mock_execute.return_value = mock_result
++
++        # Test settings
++        settings = Settings(
++            turbo_host="http://test.com",
++            local_host="http://localhost:8000",
++            planner_model="test-model",
++            coder_model="test-model",
++            api_key="sk-test-key-long-enough-for-validation",
++            max_steps=10,
++            request_timeout_s=30,
++            dry_run=False
++        )
++
++        # Execute
++        result = execute_standard_workflow("test task", settings, mock_reporter)
++
++        # Verify calls
++        mock_reporter.on_planning_start.assert_called_once()
++        mock_get_plan.assert_called_once_with("test task", settings, enhance=True)
++        mock_reporter.on_plan_created.assert_called_once_with(mock_plan.plan)
++        mock_reporter.on_execution_start.assert_called_once()
++        mock_reporter.on_step_start.assert_has_calls([
++            ((mock_plan.plan[0], 1, 2), {}),
++            ((mock_plan.plan[1], 2, 2), {})
++        ])
++        mock_execute.assert_called_once_with(mock_plan.coder_prompt, settings, mock_reporter)
++        assert result == mock_result
++
++    @patch('agent.main.get_plan')
++    @patch('agent.core.config.Settings._validate_settings')
++    def test_execute_standard_workflow_dry_run(self, mock_validate, mock_get_plan):
++        """Test dry run mode."""
++        mock_validate.return_value = None  # Skip validation
++        mock_reporter = Mock()
++
++        mock_plan = Mock()
++        mock_get_plan.return_value = mock_plan
++
++        settings = Settings(
++            turbo_host="http://test.com",
++            local_host="http://localhost:8000",
++            planner_model="test-model",
++            coder_model="test-model",
++            api_key="sk-test-key-long-enough-for-validation",
++            max_steps=10,
++            request_timeout_s=30,
++            dry_run=True
++        )
++
++        result = execute_standard_workflow("test task", settings, mock_reporter)
++
++        # Should return plan without executing
++        assert result == mock_plan
++        mock_reporter.on_execution_start.assert_not_called()
++
++    @patch('agent.main.get_plan')
++    @patch('agent.main.execute')
++    @patch('agent.core.config.Settings._validate_settings')
++    def test_execute_standard_workflow_no_enhance(self, mock_validate, mock_execute, mock_get_plan):
++        """Test workflow without enhancement."""
++        mock_validate.return_value = None  # Skip validation
++        mock_reporter = Mock()
++
++        mock_plan = Mock()
++        mock_plan.plan = ["step1", "step2"]  # Make it iterable
++        mock_plan.coder_prompt = "test prompt"
++        mock_get_plan.return_value = mock_plan
++
++        mock_result = Mock()
++        mock_execute.return_value = mock_result
++
++        settings = Settings(
++            turbo_host="http://test.com",
++            local_host="http://localhost:8000",
++            planner_model="test-model",
++            coder_model="test-model",
++            api_key="sk-test-key-long-enough-for-validation",
++            max_steps=10,
++            request_timeout_s=30,
++            dry_run=False
++        )
++
++        result = execute_standard_workflow("test task", settings, mock_reporter, enhance=False)
++
++        mock_get_plan.assert_called_once_with("test task", settings, enhance=False)
++        assert result == mock_result
++
++
++class TestExecuteEnhancedWorkflow:
++    """Tests for execute_enhanced_workflow function."""
++
++    @patch('agent.team.workflow.CodingWorkflow')
++    @patch('agent.core.config.Settings._validate_settings')
++    def test_execute_enhanced_workflow_success(self, mock_validate, mock_coding_workflow):
++        """Test successful execution of enhanced workflow."""
++        mock_validate.return_value = None  # Skip validation
++        mock_reporter = Mock()
++
++        mock_workflow_instance = Mock()
++        mock_workflow_instance.execute_full_workflow.return_value = "success"
++        mock_coding_workflow.return_value = mock_workflow_instance
++
++        settings = Settings(
++            turbo_host="http://test.com",
++            local_host="http://localhost:8000",
++            planner_model="test-model",
++            coder_model="test-model",
++            api_key="sk-test-key-long-enough-for-validation",
++            max_steps=10,
++            request_timeout_s=30,
++            dry_run=False
++        )
++
++        result = execute_enhanced_workflow(
++            "test task", settings, mock_reporter,
++            enable_review=True, enable_testing=True, enable_docs=True, full_team=True
++        )
++
++        mock_reporter.on_planning_start.assert_called_once()
++        mock_coding_workflow.assert_called_once()
++        mock_workflow_instance.execute_full_workflow.assert_called_once_with(
++            description="test task",
++            skip_review=False,
++            skip_testing=False,
++            apply_changes=True
++        )
++        assert result == "success"
++
++    @patch('agent.main.execute_standard_workflow')
++    @patch('agent.core.config.Settings._validate_settings')
++    def test_execute_enhanced_workflow_fallback(self, mock_validate, mock_standard_workflow):
++        """Test fallback to standard workflow when team workflow fails to import."""
++        mock_validate.return_value = None  # Skip validation
++        mock_reporter = Mock()
++
++        mock_standard_workflow.return_value = "fallback_result"
++
++        settings = Settings(
++            turbo_host="http://test.com",
++            local_host="http://localhost:8000",
++            planner_model="test-model",
++            coder_model="test-model",
++            api_key="sk-test-key-long-enough-for-validation",
++            max_steps=10,
++            request_timeout_s=30,
++            dry_run=False
++        )
++
++        # Mock the import to fail by patching the module before import
++        import sys
++        original_modules = sys.modules.copy()
++        try:
++            # Remove the module if it exists
++            if 'agent.team.workflow' in sys.modules:
++                del sys.modules['agent.team.workflow']
++            # Make sure the parent modules exist but workflow doesn't
++            sys.modules['agent.team'] = Mock()
++            # Now the import will fail
++            result = execute_enhanced_workflow("test task", settings, mock_reporter)
++        finally:
++            sys.modules.update(original_modules)
++
++        mock_standard_workflow.assert_called_once_with("test task", settings, mock_reporter)
++        assert result == "fallback_result"
+\ No newline at end of file

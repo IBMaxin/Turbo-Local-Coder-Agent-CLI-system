@@ -1,0 +1,88 @@
+From 431cb133611465677e49b68a1c165002ca540233 Mon Sep 17 00:00:00 2001
+From: IBMaxin <IBMaxin@users.noreply.github.com>
+Date: Thu, 22 Jan 2026 13:00:00 -0700
+Subject: [PATCH 3/3] ci: Add security testing and type checking infrastructure
+
+- Configures mypy for strict type checking
+- Adds GitHub workflow for tests and security scans
+- Configures pytest for unit/integration testing
+
+Signed-off-by: IBMaxin <IBMaxin@users.noreply.github.com>
+---
+ .github/workflows/ci.yml | 35 +++++++++++++++++++++++++++++++++++
+ mypy.ini                 | 12 ++++++++++++
+ pyproject.toml           | 15 +++++++++++++++
+ 3 files changed, 62 insertions(+)
+ create mode 100644 .github/workflows/ci.yml
+ create mode 100644 mypy.ini
+ create mode 100644 pyproject.toml
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+new file mode 100644
+index 0000000..f9a3b2c
+--- /dev/null
++++ b/.github/workflows/ci.yml
+@@ -0,0 +1,35 @@
++name: CI
++
++on: [push, pull_request]
++
++jobs:
++  test:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v3
++      
++      - name: Set up Python
++        uses: actions/setup-python@v4
++        with:
++          python-version: '3.10'
++          
++      - name: Install dependencies
++        run: |
++          pip install -r requirements.txt
++          pip install pytest mypy bandit
++          
++      - name: Type check
++        run: mypy agent/
++        
++      - name: Security scan
++        run: bandit -r agent/
++        
++      - name: Run tests
++        run: pytest tests/
++diff --git a/mypy.ini b/mypy.ini
+new file mode 100644
+index 0000000..c8d1a22
+--- /dev/null
++++ b/mypy.ini
+@@ -0,0 +1,12 @@
++[mypy]
++python_version = 3.10
++warn_return_any = True
++warn_unused_configs = True
++disallow_untyped_defs = True
++check_untyped_defs = True
++
++[mypy-tests.*]
++ignore_errors = True
++diff --git a/pyproject.toml b/pyproject.toml
+new file mode 100644
+index 0000000..d4e2f11
+--- /dev/null
++++ b/pyproject.toml
+@@ -0,0 +1,15 @@
++[tool.pytest.ini_options]
++minversion = "6.0"
++addopts = "-ra -q"
++testpaths = [
++    "tests",
++]
++
++[tool.bandit]
++exclude_dirs = ["tests"]
++
++[tool.isort]
++profile = "black"
+-- 
+2.34.1

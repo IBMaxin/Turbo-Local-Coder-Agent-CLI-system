@@ -1,0 +1,19 @@
+From 807f9b42d994b19b52a6391a95ac3384a9733b34 Mon Sep 17 00:00:00 2001
+From: IBMaxin <119638271+IBMaxin@users.noreply.github.com>
+Date: Thu, 22 Jan 2026 13:34:00 -0700
+Subject: [PATCH 6/6] fix: toolcall typing + lazy agent import for green pytest
+
+- Define ToolCall and OpenAI-style ToolSchema in executor/base.py (used by formatters)
+- Avoid circular imports by lazy importing tool schemas in get_tool_schema()
+- Make agent/__init__.py lazy-load cli to prevent test collection side effects
+- Remove conflicting ToolSchema/ExecSummary from executor/types.py
+- Align runner/tools to use executor.base.ToolSchema
+
+---
+ agent/__init__.py              | 20 +++++++++++++++-----
+ agent/core/executor/base.py    | 80 +++++++++++++++++++++++++++++++++++++++++-
+ agent/core/executor/tools.py   | 10 ++++++---
+ agent/core/executor/types.py   | 16 +++------
+ agent/core/executor/runner.py  | 18 +++++++---
+ 5 files changed, 118 insertions(+), 26 deletions(-)
+

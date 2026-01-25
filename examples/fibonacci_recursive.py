@@ -1,0 +1,1 @@
+def fibonacci_recursive(n: int) -> int:\n    \n    def _fib(n: int) -> int:\n        if n < 0:\n            raise ValueError("Input must be a non-negative integer.")\n        if n == 0:\n            return 0\n        if n == 1:\n            return 1\n        return _fib(n - 1) + _fib(n - 2)\n    return _fib(n)

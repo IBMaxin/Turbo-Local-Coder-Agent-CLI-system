@@ -1,0 +1,1 @@
+def fibonacci_iterative(n: int) -> int:\n    \n    def _fib(n: int) -> int:\n        if n < 0:\n            raise ValueError("Input must be a non-negative integer.")\n        if n == 0:\n            return 0\n        a, b = 0, 1\n        for _ in range(n - 1):\n            a, b = b, a + b\n        return a\n    return _fib(n)

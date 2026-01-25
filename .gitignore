@@ -37,6 +37,9 @@ venv.bak/
 *.swo
 *~
 
+# MCP configurations (may contain secrets)
+.continue/
+
 # OS
 .DS_Store
 .DS_Store?

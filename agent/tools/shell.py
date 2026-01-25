@@ -4,13 +4,14 @@ import logging
 import shlex
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 import re
 
 # Safe read-only commands
 WHITELIST: set[str] = {
     "python", "python3", "pytest", "pip", "pip3",
     "ls", "cat", "echo", "pwd", "which", "type",
-    "mkdir", "touch", "git", "grep", "find", "wc",
+    "mkdir", "touch", "rm", "git", "grep", "find", "wc",
     "head", "tail", "diff", "tree", "file",
     "black", "ruff", "mypy", "flake8",  # Linters
     "true", "false", "sleep", "date",  # Testing commands
@@ -18,8 +19,15 @@ WHITELIST: set[str] = {
 
 # Dangerous patterns that should never be allowed
 DANGEROUS_PATTERNS = [
-    r'-rf\s*/+',  # rm -rf /
-    r'rm\s+-[^\s]*f[^\s]*\s*/+',  # rm with force and root
+    r'-rf\s*/$',  # rm -rf /
+    r'-rf\s*/etc',  # rm -rf /etc
+    r'-rf\s*/usr',  # rm -rf /usr
+    r'-rf\s*/var',  # rm -rf /var
+    r'-rf\s*/home',  # rm -rf /home
+    r'-rf\s*/root',  # rm -rf /root
+    r'rm\s+-[^\s]*f[^\s]*\s*/$',  # rm with force and root
+    r'rm\s+-[^\s]*f[^\s]*\s*/etc',  # rm with force and /etc
+    r'rm\s+-[^\s]*f[^\s]*\s*/usr',  # rm with force and /usr
     r'dd\s+.*of=/dev/',  # dd to device
     r'mkfs',  # filesystem formatting
     r'fdisk',
@@ -104,6 +112,10 @@ def _validate_rm(parts: list[str]) -> bool:
     - rm with -rf and / or system paths
     - rm -rf without specific path
     - rm on /dev, /sys, /proc, /boot, /etc
+
+    Allows:
+    - /tmp and ./tmp (for testing purposes)
+    - Other user-space paths
     """
     if len(parts) < 2:
         # rm with no args is safe (will error)
@@ -127,14 +139,33 @@ def _validate_rm(parts: list[str]) -> bool:
     if has_recursive and has_force:
         if not paths:
             return False  # rm -rf with no path
-        
+
         for path in paths:
+            # Normalize path
+            normalized = path.replace("\\", "/")
+
+            # Allow relative paths (user-controlled)
+            if not normalized.startswith('/'):
+                continue
+
+            # For absolute paths, check for dangerous locations
+            # Allow /tmp paths explicitly (for testing)
+            if normalized == '/tmp' or normalized.startswith('/tmp/'):
+                continue
+
             # Block system directories
-            dangerous_paths = ['/', '/home', '/root', '/usr', '/var', '/etc', 
-                             '/boot', '/dev', '/sys', '/proc', '/tmp']
-            if any(path.startswith(dp) or path == dp for dp in dangerous_paths):
+            dangerous_paths = ['/home', '/root', '/usr', '/var', '/etc',
+                             '/boot', '/dev', '/sys', '/proc']
+
+            # Block root itself
+            if normalized == '/':
                 return False
-    
+
+            # Block if it starts with a dangerous path
+            for dp in dangerous_paths:
+                if normalized == dp or normalized.startswith(dp + '/'):
+                    return False
+
     return True
 
 

@@ -265,13 +265,14 @@ class RAGCoderAgent(RAGEnhancedAgent, Agent):
         total_lines = 0
         total_functions = 0
         total_classes = 0
-        
+
         for content in files.values():
+            content = content.rstrip('\n')
             lines = content.split('\n')
-            total_lines += len([l for l in lines if l.strip()])
+            total_lines += len(lines)
             total_functions += content.count('def ')
             total_classes += content.count('class ')
-        
+
         return {
             "total_lines": total_lines,
             "total_functions": total_functions,
@@ -403,13 +404,14 @@ class RAGReviewerAgent(RAGEnhancedAgent, Agent):
     
     def _assess_complexity(self, content: str) -> str:
         """Assess code complexity."""
-        lines = len([l for l in content.split('\n') if l.strip()])
+        lines = len(content.split('\n'))
         functions = content.count('def ')
         classes = content.count('class ')
-        nested_loops = content.count('for ') * content.count('while ') 
-        
-        complexity_score = lines * 0.1 + functions * 2 + classes * 3 + nested_loops * 1.5
-        
+        ifs = content.count('if ')
+        nested_loops = content.count('for ') * content.count('while ')
+
+        complexity_score = lines * 1 + functions * 2 + classes * 3 + ifs * 1 + nested_loops * 1.5
+
         if complexity_score < 20:
             return "low"
         elif complexity_score < 60:
